@@ -79,18 +79,19 @@ logger = logging.getLogger(__name__)
 # HELPER FUNCTIONS
 # ========================================
 
-def create_smb_connection(server_ip: str, username: str, password: str) -> SMBConnection:
+def create_smb_connection(server_ip: str, username: str, password: str, port: int = 445) -> SMBConnection:
     """Create and return an SMB connection"""
     try:
-        conn = SMBConnection(username, password, CLIENT_MACHINE_NAME, SERVER_MACHINE_NAME, use_ntlm_v2=True)
-        connected = conn.connect(server_ip, port=SOURCE_NAS_PORT)
+        conn = SMBConnection(username, password, CLIENT_MACHINE_NAME, SERVER_MACHINE_NAME, 
+                           use_ntlm_v2=True, is_direct_tcp=True)
+        connected = conn.connect(server_ip, port=port)
         if connected:
-            logger.info(f"Successfully connected to {server_ip}")
+            logger.info(f"Successfully connected to {server_ip}:{port}")
             return conn
         else:
-            raise Exception(f"Failed to connect to {server_ip}")
+            raise Exception(f"Failed to connect to {server_ip}:{port}")
     except Exception as e:
-        logger.error(f"Connection error to {server_ip}: {str(e)}")
+        logger.error(f"Connection error to {server_ip}:{port}: {str(e)}")
         raise
 
 def is_valid_year_folder(folder_name: str) -> bool:
@@ -339,11 +340,11 @@ def main():
     try:
         # Connect to source NAS
         logger.info(f"Connecting to source NAS ({SOURCE_NAS_IP})...")
-        source_conn = create_smb_connection(SOURCE_NAS_IP, NAS_USERNAME, NAS_PASSWORD)
+        source_conn = create_smb_connection(SOURCE_NAS_IP, NAS_USERNAME, NAS_PASSWORD, SOURCE_NAS_PORT)
         
         # Connect to destination NAS
         logger.info(f"Connecting to destination NAS ({DEST_NAS_IP})...")
-        dest_conn = create_smb_connection(DEST_NAS_IP, NAS_USERNAME, NAS_PASSWORD)
+        dest_conn = create_smb_connection(DEST_NAS_IP, NAS_USERNAME, NAS_PASSWORD, DEST_NAS_PORT)
         
         # Scan destination for existing files
         existing_files = scan_destination(dest_conn, DEST_CONFIG['share'], DEST_CONFIG['base_path'])
