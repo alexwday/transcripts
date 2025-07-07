@@ -39,14 +39,16 @@ SOURCE_NAS_PORT = 445
 CANADIAN_CONFIG = {
     "name": "Canadian Banks",
     "share": "wrkgrp30",
-    "base_path": "Investor Relations/5. Benchmarking/Peer Benchmarking/Canadian Peer Benchmarking"
+    "base_path": "Investor Relations/5. Benchmarking/Peer Benchmarking/Canadian Peer Benchmarking",
+    "target_folders": ["final transcripts"]  # Case-insensitive
 }
 
 # US Banks Source  
 US_CONFIG = {
     "name": "US Banks",
     "share": "wrkgrp30",
-    "base_path": "Investor Relations/5. Benchmarking/Peer Benchmarking/US Peer Benchmarking"
+    "base_path": "Investor Relations/5. Benchmarking/Peer Benchmarking/US Peer Benchmarking",
+    "target_folders": ["clean transcript", "clean transcripts"]  # Case-insensitive
 }
 
 # Destination NAS Configuration
@@ -59,37 +61,15 @@ DEST_CONFIG = {
 
 # Processing Configuration
 VALID_YEAR_RANGE = (2020, 2031)  # Updated to start from 2020
+VALID_QUARTERS = ["Q1", "Q2", "Q3", "Q4"]
 FILE_EXTENSIONS = [".pdf", ".PDF"]
-
-# ========================================
-# FLEXIBLE PATTERN MATCHING
-# ========================================
-# NOTE: These patterns handle various naming conventions using regex-like matching
-# Patterns are case-insensitive and designed to catch variations
-
-# Quarter folder patterns (case-insensitive)
-# Matches: Q1, Q1xx, Q1 xxxx, Q121, Q1 2020, etc.
-QUARTER_PATTERNS = [
-    r"^Q1",  # Matches anything starting with Q1
-    r"^Q2",  # Matches anything starting with Q2  
-    r"^Q3",  # Matches anything starting with Q3
-    r"^Q4"   # Matches anything starting with Q4
-]
-
-# Target transcript folder patterns (case-insensitive)
-# Matches various combinations of: final, clean, transcript(s)
-TRANSCRIPT_FOLDER_PATTERNS = [
-    r"final.*transcript",      # Matches "final transcripts", "final transcript", etc.
-    r"clean.*transcript",      # Matches "clean transcripts", "clean transcript", etc.
-    r"clean.*final.*transcript"  # Matches "clean final transcripts", etc.
-]
 
 # ========================================
 # LOGGING SETUP
 # ========================================
 
 logging.basicConfig(
-    level=logging.DEBUG,
+    level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
     datefmt='%Y-%m-%d %H:%M:%S'
 )
@@ -122,46 +102,40 @@ def is_valid_year_folder(folder_name: str) -> bool:
     except ValueError:
         return False
 
-def is_quarter_folder(folder_name: str) -> Tuple[bool, str]:
-    """Check if folder matches any quarter pattern and return the normalized quarter"""
-    import re
+def is_quarter_folder(folder_name: str) -> bool:
+    """Check if folder matches any quarter pattern (flexible matching)"""
     folder_lower = folder_name.lower()
-    
-    logger.debug(f"Checking quarter folder: '{folder_name}' (lowercase: '{folder_lower}')")
-    
-    for pattern in QUARTER_PATTERNS:
-        if re.match(pattern, folder_lower):
-            logger.debug(f"  Matched pattern: {pattern}")
-            # Extract the quarter number and normalize it
-            if folder_lower.startswith('q1'):
-                logger.debug(f"  Normalized to: Q1")
-                return True, 'Q1'
-            elif folder_lower.startswith('q2'):
-                logger.debug(f"  Normalized to: Q2")
-                return True, 'Q2'
-            elif folder_lower.startswith('q3'):
-                logger.debug(f"  Normalized to: Q3")
-                return True, 'Q3'
-            elif folder_lower.startswith('q4'):
-                logger.debug(f"  Normalized to: Q4")
-                return True, 'Q4'
-    
-    logger.debug(f"  No pattern matched for '{folder_name}'")
-    return False, ''
+    # Match Q1, Q121, Q1 2020, Q1 2022, etc.
+    return (folder_lower.startswith('q1') or folder_lower.startswith('q2') or 
+            folder_lower.startswith('q3') or folder_lower.startswith('q4'))
 
-def is_target_folder(folder_name: str) -> bool:
-    """Check if folder matches any of the target transcript patterns (case-insensitive)"""
-    import re
+def get_normalized_quarter(folder_name: str) -> str:
+    """Get normalized quarter name (Q1, Q2, Q3, Q4) from any quarter folder name"""
+    folder_lower = folder_name.lower()
+    if folder_lower.startswith('q1'):
+        return 'Q1'
+    elif folder_lower.startswith('q2'):
+        return 'Q2'
+    elif folder_lower.startswith('q3'):
+        return 'Q3'
+    elif folder_lower.startswith('q4'):
+        return 'Q4'
+    return folder_name  # fallback
+
+def is_target_folder(folder_name: str, target_patterns: List[str]) -> bool:
+    """Check if folder matches any of the target patterns (case-insensitive and flexible)"""
     folder_lower = folder_name.lower()
     
-    logger.debug(f"Checking target folder: '{folder_name}' (lowercase: '{folder_lower}')")
+    # First check exact matches (for backward compatibility)
+    if any(folder_lower == pattern.lower() for pattern in target_patterns):
+        return True
     
-    for pattern in TRANSCRIPT_FOLDER_PATTERNS:
-        if re.search(pattern, folder_lower):
-            logger.debug(f"  Matched transcript pattern: {pattern}")
-            return True
+    # Then check flexible patterns for transcript folders
+    # Matches: "clean final transcripts", "final transcripts", etc.
+    if ('transcript' in folder_lower and 
+        ('final' in folder_lower or 'clean' in folder_lower)):
+        return True
     
-    logger.debug(f"  No transcript pattern matched for '{folder_name}'")
     return False
 
 def get_file_info(conn: SMBConnection, share: str, file_path: str) -> Dict:
@@ -199,37 +173,27 @@ def scan_destination(conn: SMBConnection, share: str, base_path: str) -> Dict[st
                         scan_folder(item_path)
                     else:
                         if any(item.filename.endswith(ext) for ext in FILE_EXTENSIONS):
-                            # Parse path relative to base path: should be year/quarter/filename
-                            # Remove base path to get relative path
-                            relative_path = item_path
-                            if item_path.startswith(base_path + "/"):
-                                relative_path = item_path[len(base_path) + 1:]
-                            
-                            path_parts = relative_path.split('/')
-                            logger.debug(f"Parsing destination file path: {item_path}")
-                            logger.debug(f"  Relative path: {relative_path}")
-                            logger.debug(f"  Path parts: {path_parts}")
-                            
-                            # Expected structure: year/quarter/filename
+                            # Create a standardized key: year/quarter/filename
+                            path_parts = item_path.split('/')
                             if len(path_parts) >= 3:
-                                potential_year = path_parts[0]
-                                potential_quarter = path_parts[1]
+                                year = None
+                                quarter = None
                                 
-                                if is_valid_year_folder(potential_year):
-                                    is_quarter, normalized_quarter = is_quarter_folder(potential_quarter)
-                                    if is_quarter:
-                                        key = f"{potential_year}/{normalized_quarter}/{item.filename}"
-                                        existing_files[key] = {
-                                            'path': item_path,
-                                            'last_modified': item.last_write_time,
-                                            'size': item.file_size
-                                        }
-                                        files_count += 1
-                                        logger.debug(f"  Added to existing files: {key}")
-                                    else:
-                                        logger.debug(f"  Skipped - '{potential_quarter}' not a valid quarter")
-                                else:
-                                    logger.debug(f"  Skipped - '{potential_year}' not a valid year")
+                                # Find year and quarter in path
+                                for part in path_parts:
+                                    if is_valid_year_folder(part):
+                                        year = part
+                                    elif is_quarter_folder(part):
+                                        quarter = get_normalized_quarter(part)
+                                
+                                if year and quarter:
+                                    key = f"{year}/{quarter}/{item.filename}"
+                                    existing_files[key] = {
+                                        'path': item_path,
+                                        'last_modified': item.last_write_time,
+                                        'size': item.file_size
+                                    }
+                                    files_count += 1
             except Exception as e:
                 logger.error(f"Error scanning folder {path}: {str(e)}")
         
@@ -241,7 +205,7 @@ def scan_destination(conn: SMBConnection, share: str, base_path: str) -> Dict[st
     
     return existing_files
 
-def scan_source(conn: SMBConnection, config: Dict) -> Dict[str, Dict]:
+def scan_source(conn: SMBConnection, config: Dict, target_folders: List[str]) -> Dict[str, Dict]:
     """Scan source folder for transcript files"""
     logger.info(f"Scanning {config['name']} source folder...")
     source_files = {}
@@ -254,12 +218,8 @@ def scan_source(conn: SMBConnection, config: Dict) -> Dict[str, Dict]:
             if year_item.filename in ['.', '..'] or not year_item.isDirectory:
                 continue
             
-            logger.debug(f"Found folder: '{year_item.filename}'")
             if not is_valid_year_folder(year_item.filename):
-                logger.debug(f"  Skipping - not a valid year folder")
                 continue
-            
-            logger.debug(f"  Valid year folder: {year_item.filename}")
             
             year = year_item.filename
             year_path = f"{config['base_path']}/{year}"
@@ -271,11 +231,10 @@ def scan_source(conn: SMBConnection, config: Dict) -> Dict[str, Dict]:
                     if quarter_item.filename in ['.', '..'] or not quarter_item.isDirectory:
                         continue
                     
-                    is_quarter, normalized_quarter = is_quarter_folder(quarter_item.filename)
-                    if not is_quarter:
+                    if not is_quarter_folder(quarter_item.filename):
                         continue
                     
-                    quarter = normalized_quarter  # Use normalized quarter (Q1, Q2, etc.)
+                    quarter = get_normalized_quarter(quarter_item.filename)
                     quarter_path = f"{year_path}/{quarter_item.filename}"  # Use actual folder name for path
                     
                     try:
@@ -285,7 +244,7 @@ def scan_source(conn: SMBConnection, config: Dict) -> Dict[str, Dict]:
                             if folder_item.filename in ['.', '..'] or not folder_item.isDirectory:
                                 continue
                             
-                            if is_target_folder(folder_item.filename):
+                            if is_target_folder(folder_item.filename, target_folders):
                                 transcript_path = f"{quarter_path}/{folder_item.filename}"
                                 
                                 try:
@@ -435,11 +394,11 @@ def main():
         all_source_files = {}
         
         # Canadian banks
-        canadian_files = scan_source(source_conn, CANADIAN_CONFIG)
+        canadian_files = scan_source(source_conn, CANADIAN_CONFIG, CANADIAN_CONFIG['target_folders'])
         all_source_files.update(canadian_files)
         
         # US banks
-        us_files = scan_source(source_conn, US_CONFIG)
+        us_files = scan_source(source_conn, US_CONFIG, US_CONFIG['target_folders'])
         all_source_files.update(us_files)
         
         logger.info(f"\nTotal source files found: {len(all_source_files)}")
