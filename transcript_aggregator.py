@@ -89,7 +89,7 @@ TRANSCRIPT_FOLDER_PATTERNS = [
 # ========================================
 
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.DEBUG,
     format='%(asctime)s - %(levelname)s - %(message)s',
     datefmt='%Y-%m-%d %H:%M:%S'
 )
@@ -127,18 +127,26 @@ def is_quarter_folder(folder_name: str) -> Tuple[bool, str]:
     import re
     folder_lower = folder_name.lower()
     
+    logger.debug(f"Checking quarter folder: '{folder_name}' (lowercase: '{folder_lower}')")
+    
     for pattern in QUARTER_PATTERNS:
         if re.match(pattern, folder_lower):
+            logger.debug(f"  Matched pattern: {pattern}")
             # Extract the quarter number and normalize it
             if folder_lower.startswith('q1'):
+                logger.debug(f"  Normalized to: Q1")
                 return True, 'Q1'
             elif folder_lower.startswith('q2'):
+                logger.debug(f"  Normalized to: Q2")
                 return True, 'Q2'
             elif folder_lower.startswith('q3'):
+                logger.debug(f"  Normalized to: Q3")
                 return True, 'Q3'
             elif folder_lower.startswith('q4'):
+                logger.debug(f"  Normalized to: Q4")
                 return True, 'Q4'
     
+    logger.debug(f"  No pattern matched for '{folder_name}'")
     return False, ''
 
 def is_target_folder(folder_name: str) -> bool:
@@ -146,10 +154,14 @@ def is_target_folder(folder_name: str) -> bool:
     import re
     folder_lower = folder_name.lower()
     
+    logger.debug(f"Checking target folder: '{folder_name}' (lowercase: '{folder_lower}')")
+    
     for pattern in TRANSCRIPT_FOLDER_PATTERNS:
         if re.search(pattern, folder_lower):
+            logger.debug(f"  Matched transcript pattern: {pattern}")
             return True
     
+    logger.debug(f"  No transcript pattern matched for '{folder_name}'")
     return False
 
 def get_file_info(conn: SMBConnection, share: str, file_path: str) -> Dict:
@@ -234,8 +246,12 @@ def scan_source(conn: SMBConnection, config: Dict) -> Dict[str, Dict]:
             if year_item.filename in ['.', '..'] or not year_item.isDirectory:
                 continue
             
+            logger.debug(f"Found folder: '{year_item.filename}'")
             if not is_valid_year_folder(year_item.filename):
+                logger.debug(f"  Skipping - not a valid year folder")
                 continue
+            
+            logger.debug(f"  Valid year folder: {year_item.filename}")
             
             year = year_item.filename
             year_path = f"{config['base_path']}/{year}"
