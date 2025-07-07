@@ -281,17 +281,25 @@ def copy_file(source_conn: SMBConnection, dest_conn: SMBConnection,
               source_share: str, dest_share: str, source_path: str, dest_path: str) -> bool:
     """Copy file from source to destination"""
     try:
+        # Create temporary file-like object to hold the data
+        from io import BytesIO
+        temp_file = BytesIO()
+        
         # Read file from source
-        with source_conn.retrieveFile(source_share, source_path) as source_file:
-            file_data = source_file.read()
+        source_conn.retrieveFile(source_share, source_path, temp_file)
         
         # Ensure destination directory exists
         dest_dir = '/'.join(dest_path.split('/')[:-1])
         ensure_directory_exists(dest_conn, dest_share, dest_dir)
         
+        # Reset file pointer to beginning
+        temp_file.seek(0)
+        
         # Write file to destination
-        with dest_conn.storeFile(dest_share, dest_path) as dest_file:
-            dest_file.write(file_data)
+        dest_conn.storeFile(dest_share, dest_path, temp_file)
+        
+        # Clean up
+        temp_file.close()
         
         return True
         
@@ -315,8 +323,10 @@ def write_error_log(dest_conn: SMBConnection, errors: List[str]):
         log_content += f"{error}\n"
     
     try:
-        with dest_conn.storeFile(DEST_CONFIG['share'], log_path) as log_file:
-            log_file.write(log_content.encode('utf-8'))
+        from io import BytesIO
+        log_file = BytesIO(log_content.encode('utf-8'))
+        dest_conn.storeFile(DEST_CONFIG['share'], log_path, log_file)
+        log_file.close()
         logger.info(f"Error log written to: {log_path}")
     except Exception as e:
         logger.error(f"Failed to write error log: {str(e)}")
