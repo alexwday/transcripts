@@ -69,7 +69,7 @@ FILE_EXTENSIONS = [".pdf", ".PDF"]
 # ========================================
 
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.DEBUG,
     format='%(asctime)s - %(levelname)s - %(message)s',
     datefmt='%Y-%m-%d %H:%M:%S'
 )
@@ -285,8 +285,15 @@ def copy_file(source_conn: SMBConnection, dest_conn: SMBConnection,
         from io import BytesIO
         temp_file = BytesIO()
         
+        # Debug logging
+        logger.debug(f"Copying file: {source_path} -> {dest_path}")
+        logger.debug(f"Source share: {source_share}, Dest share: {dest_share}")
+        logger.debug(f"temp_file type: {type(temp_file)}")
+        
         # Read file from source
+        logger.debug(f"Calling retrieveFile with: share={source_share}, path={source_path}, file_obj={temp_file}")
         source_conn.retrieveFile(source_share, source_path, temp_file)
+        logger.debug(f"retrieveFile completed, bytes read: {temp_file.tell()}")
         
         # Ensure destination directory exists
         dest_dir = '/'.join(dest_path.split('/')[:-1])
@@ -296,7 +303,9 @@ def copy_file(source_conn: SMBConnection, dest_conn: SMBConnection,
         temp_file.seek(0)
         
         # Write file to destination
-        dest_conn.storeFile(dest_share, dest_path, temp_file)
+        logger.debug(f"Calling storeFile with: share={dest_share}, path={dest_path}, file_obj={temp_file}")
+        result = dest_conn.storeFile(dest_share, dest_path, temp_file)
+        logger.debug(f"storeFile completed, bytes written: {result}")
         
         # Clean up
         temp_file.close()
@@ -305,6 +314,9 @@ def copy_file(source_conn: SMBConnection, dest_conn: SMBConnection,
         
     except Exception as e:
         logger.error(f"Failed to copy {source_path} to {dest_path}: {str(e)}")
+        logger.error(f"Error type: {type(e)}")
+        import traceback
+        logger.error(f"Traceback: {traceback.format_exc()}")
         return False
 
 def write_error_log(dest_conn: SMBConnection, errors: List[str]):
