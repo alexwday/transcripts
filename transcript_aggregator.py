@@ -199,29 +199,37 @@ def scan_destination(conn: SMBConnection, share: str, base_path: str) -> Dict[st
                         scan_folder(item_path)
                     else:
                         if any(item.filename.endswith(ext) for ext in FILE_EXTENSIONS):
-                            # Create a standardized key: year/quarter/filename
-                            path_parts = item_path.split('/')
+                            # Parse path relative to base path: should be year/quarter/filename
+                            # Remove base path to get relative path
+                            relative_path = item_path
+                            if item_path.startswith(base_path + "/"):
+                                relative_path = item_path[len(base_path) + 1:]
+                            
+                            path_parts = relative_path.split('/')
+                            logger.debug(f"Parsing destination file path: {item_path}")
+                            logger.debug(f"  Relative path: {relative_path}")
+                            logger.debug(f"  Path parts: {path_parts}")
+                            
+                            # Expected structure: year/quarter/filename
                             if len(path_parts) >= 3:
-                                year = None
-                                quarter = None
+                                potential_year = path_parts[0]
+                                potential_quarter = path_parts[1]
                                 
-                                # Find year and quarter in path
-                                for part in path_parts:
-                                    if is_valid_year_folder(part):
-                                        year = part
+                                if is_valid_year_folder(potential_year):
+                                    is_quarter, normalized_quarter = is_quarter_folder(potential_quarter)
+                                    if is_quarter:
+                                        key = f"{potential_year}/{normalized_quarter}/{item.filename}"
+                                        existing_files[key] = {
+                                            'path': item_path,
+                                            'last_modified': item.last_write_time,
+                                            'size': item.file_size
+                                        }
+                                        files_count += 1
+                                        logger.debug(f"  Added to existing files: {key}")
                                     else:
-                                        is_quarter, normalized_quarter = is_quarter_folder(part)
-                                        if is_quarter:
-                                            quarter = normalized_quarter
-                                
-                                if year and quarter:
-                                    key = f"{year}/{quarter}/{item.filename}"
-                                    existing_files[key] = {
-                                        'path': item_path,
-                                        'last_modified': item.last_write_time,
-                                        'size': item.file_size
-                                    }
-                                    files_count += 1
+                                        logger.debug(f"  Skipped - '{potential_quarter}' not a valid quarter")
+                                else:
+                                    logger.debug(f"  Skipped - '{potential_year}' not a valid year")
             except Exception as e:
                 logger.error(f"Error scanning folder {path}: {str(e)}")
         
