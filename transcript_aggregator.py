@@ -39,16 +39,14 @@ SOURCE_NAS_PORT = 445
 CANADIAN_CONFIG = {
     "name": "Canadian Banks",
     "share": "wrkgrp30",
-    "base_path": "Investor Relations/5. Benchmarking/Peer Benchmarking/Canadian Peer Benchmarking",
-    "target_folders": ["final transcripts"]  # Case-insensitive
+    "base_path": "Investor Relations/5. Benchmarking/Peer Benchmarking/Canadian Peer Benchmarking"
 }
 
 # US Banks Source  
 US_CONFIG = {
     "name": "US Banks",
     "share": "wrkgrp30",
-    "base_path": "Investor Relations/5. Benchmarking/Peer Benchmarking/US Peer Benchmarking",
-    "target_folders": ["clean transcript", "clean transcripts"]  # Case-insensitive
+    "base_path": "Investor Relations/5. Benchmarking/Peer Benchmarking/US Peer Benchmarking"
 }
 
 # Destination NAS Configuration
@@ -60,9 +58,31 @@ DEST_CONFIG = {
 }
 
 # Processing Configuration
-VALID_YEAR_RANGE = (2001, 2031)
-VALID_QUARTERS = ["Q1", "Q2", "Q3", "Q4"]
+VALID_YEAR_RANGE = (2020, 2031)  # Updated to start from 2020
 FILE_EXTENSIONS = [".pdf", ".PDF"]
+
+# ========================================
+# FLEXIBLE PATTERN MATCHING
+# ========================================
+# NOTE: These patterns handle various naming conventions using regex-like matching
+# Patterns are case-insensitive and designed to catch variations
+
+# Quarter folder patterns (case-insensitive)
+# Matches: Q1, Q1xx, Q1 xxxx, Q121, Q1 2020, etc.
+QUARTER_PATTERNS = [
+    r"^Q1",  # Matches anything starting with Q1
+    r"^Q2",  # Matches anything starting with Q2  
+    r"^Q3",  # Matches anything starting with Q3
+    r"^Q4"   # Matches anything starting with Q4
+]
+
+# Target transcript folder patterns (case-insensitive)
+# Matches various combinations of: final, clean, transcript(s)
+TRANSCRIPT_FOLDER_PATTERNS = [
+    r"final.*transcript",      # Matches "final transcripts", "final transcript", etc.
+    r"clean.*transcript",      # Matches "clean transcripts", "clean transcript", etc.
+    r"clean.*final.*transcript"  # Matches "clean final transcripts", etc.
+]
 
 # ========================================
 # LOGGING SETUP
@@ -102,10 +122,35 @@ def is_valid_year_folder(folder_name: str) -> bool:
     except ValueError:
         return False
 
-def is_target_folder(folder_name: str, target_patterns: List[str]) -> bool:
-    """Check if folder matches any of the target patterns (case-insensitive)"""
+def is_quarter_folder(folder_name: str) -> Tuple[bool, str]:
+    """Check if folder matches any quarter pattern and return the normalized quarter"""
+    import re
     folder_lower = folder_name.lower()
-    return any(folder_lower == pattern.lower() for pattern in target_patterns)
+    
+    for pattern in QUARTER_PATTERNS:
+        if re.match(pattern, folder_lower):
+            # Extract the quarter number and normalize it
+            if folder_lower.startswith('q1'):
+                return True, 'Q1'
+            elif folder_lower.startswith('q2'):
+                return True, 'Q2'
+            elif folder_lower.startswith('q3'):
+                return True, 'Q3'
+            elif folder_lower.startswith('q4'):
+                return True, 'Q4'
+    
+    return False, ''
+
+def is_target_folder(folder_name: str) -> bool:
+    """Check if folder matches any of the target transcript patterns (case-insensitive)"""
+    import re
+    folder_lower = folder_name.lower()
+    
+    for pattern in TRANSCRIPT_FOLDER_PATTERNS:
+        if re.search(pattern, folder_lower):
+            return True
+    
+    return False
 
 def get_file_info(conn: SMBConnection, share: str, file_path: str) -> Dict:
     """Get file information including last modified time"""
@@ -152,8 +197,10 @@ def scan_destination(conn: SMBConnection, share: str, base_path: str) -> Dict[st
                                 for part in path_parts:
                                     if is_valid_year_folder(part):
                                         year = part
-                                    elif part in VALID_QUARTERS:
-                                        quarter = part
+                                    else:
+                                        is_quarter, normalized_quarter = is_quarter_folder(part)
+                                        if is_quarter:
+                                            quarter = normalized_quarter
                                 
                                 if year and quarter:
                                     key = f"{year}/{quarter}/{item.filename}"
@@ -174,7 +221,7 @@ def scan_destination(conn: SMBConnection, share: str, base_path: str) -> Dict[st
     
     return existing_files
 
-def scan_source(conn: SMBConnection, config: Dict, target_folders: List[str]) -> Dict[str, Dict]:
+def scan_source(conn: SMBConnection, config: Dict) -> Dict[str, Dict]:
     """Scan source folder for transcript files"""
     logger.info(f"Scanning {config['name']} source folder...")
     source_files = {}
@@ -200,11 +247,12 @@ def scan_source(conn: SMBConnection, config: Dict, target_folders: List[str]) ->
                     if quarter_item.filename in ['.', '..'] or not quarter_item.isDirectory:
                         continue
                     
-                    if quarter_item.filename not in VALID_QUARTERS:
+                    is_quarter, normalized_quarter = is_quarter_folder(quarter_item.filename)
+                    if not is_quarter:
                         continue
                     
-                    quarter = quarter_item.filename
-                    quarter_path = f"{year_path}/{quarter}"
+                    quarter = normalized_quarter  # Use normalized quarter (Q1, Q2, etc.)
+                    quarter_path = f"{year_path}/{quarter_item.filename}"  # Use actual folder name for path
                     
                     try:
                         transcript_folders = conn.listPath(config['share'], quarter_path)
@@ -213,7 +261,7 @@ def scan_source(conn: SMBConnection, config: Dict, target_folders: List[str]) ->
                             if folder_item.filename in ['.', '..'] or not folder_item.isDirectory:
                                 continue
                             
-                            if is_target_folder(folder_item.filename, target_folders):
+                            if is_target_folder(folder_item.filename):
                                 transcript_path = f"{quarter_path}/{folder_item.filename}"
                                 
                                 try:
@@ -363,11 +411,11 @@ def main():
         all_source_files = {}
         
         # Canadian banks
-        canadian_files = scan_source(source_conn, CANADIAN_CONFIG, CANADIAN_CONFIG['target_folders'])
+        canadian_files = scan_source(source_conn, CANADIAN_CONFIG)
         all_source_files.update(canadian_files)
         
         # US banks
-        us_files = scan_source(source_conn, US_CONFIG, US_CONFIG['target_folders'])
+        us_files = scan_source(source_conn, US_CONFIG)
         all_source_files.update(us_files)
         
         logger.info(f"\nTotal source files found: {len(all_source_files)}")
