@@ -1398,12 +1398,19 @@ def scan_for_transcripts(nas_conn: SMBConnection) -> Dict[str, Dict]:
                             if any(file_item.filename.endswith(ext) for ext in FILE_EXTENSIONS):
                                 file_path = f"{quarter_path}/{file_item.filename}"
                                 
+                                # Convert last_write_time to datetime for consistency
+                                last_modified = file_item.last_write_time
+                                if isinstance(last_modified, (int, float)):
+                                    last_modified = pd.to_datetime(last_modified, unit='s')
+                                else:
+                                    last_modified = pd.to_datetime(last_modified)
+                                
                                 transcripts[file_path] = {
                                     'filename': file_item.filename,
                                     'filepath': file_path,
                                     'fiscal_year': year,
                                     'quarter': quarter_item.filename.upper(),
-                                    'last_modified': file_item.last_write_time,
+                                    'last_modified': last_modified,
                                     'size': file_item.file_size
                                 }
                     
@@ -1443,7 +1450,10 @@ def compare_files_with_master(current_files: Dict, master_df: pd.DataFrame) -> D
         
         if pd.notna(row['last_modified']):
             master_modified = pd.to_datetime(row['last_modified'])
-            if current_modified > master_modified:
+            # Ensure current_modified is also a datetime for comparison
+            current_modified_dt = pd.to_datetime(current_modified)
+            
+            if current_modified_dt > master_modified:
                 result['modified_files'].append(current_files[filepath])
     
     # Find deleted files
