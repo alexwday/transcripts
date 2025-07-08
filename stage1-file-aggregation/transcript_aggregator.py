@@ -56,9 +56,9 @@ DEST_NAS_IP = "192.168.2.100"  # Replace with actual IP
 DEST_NAS_PORT = 445
 DEST_CONFIG = {
     "share": "wrkgrp33",
-    "base_path": "Finance Data and Analytics/DSA/AEGIS/Transcripts/database_refresh",
+    "base_path": "Finance Data and Analytics/DSA/AEGIS/Transcripts/data",
     "output_path": "Finance Data and Analytics/DSA/AEGIS/Transcripts",
-    "logs_folder": "logs"
+    "logs_folder": "database_refresh/logs"
 }
 
 # Processing Configuration

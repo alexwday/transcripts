@@ -20,7 +20,7 @@ Multi-stage system for creating comprehensive databases from Canadian and US ban
 
 ### Data Flow
 ```
-Source NAS → database_refresh/YYYY/QX/transcript.pdf
+Source NAS → data/YYYY/QX/transcript.pdf
 ```
 
 ## Stage 2: File Management (COMPLETED)
@@ -38,15 +38,15 @@ Focused file comparison and master database management:
 ### Folder Structure
 ```
 Transcripts/
-├── database_refresh/     # PDF files from Stage 1 (input)
+├── data/                # PDF files from Stage 1 (input)
 ├── database/            # Master database storage
 │   └── master_database.csv
-├── refresh_outputs/     # Processing pipeline outputs
+├── database_refresh/    # Processing pipeline outputs and logs
 │   ├── 01_files_to_add.json
-│   └── 02_files_to_delete.json
-└── logs/               # Error and summary logs
-    ├── stage1_*.log
-    └── stage2_*.log
+│   ├── 02_files_to_delete.json
+│   └── logs/           # Error and summary logs
+│       ├── stage1_*.log
+│       └── stage2_*.log
 ```
 
 ### Features

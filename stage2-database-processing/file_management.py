@@ -9,7 +9,7 @@ This stage:
 3. Compares files with master database
 4. Outputs organized file lists for processing stages
 
-Outputs to refresh_outputs folder:
+Outputs to database_refresh folder:
 - 01_files_to_add.json (new + modified files)  
 - 02_files_to_delete.json (files to remove from master)
 
@@ -50,12 +50,12 @@ NAS_IP = "192.168.2.100"
 NAS_PORT = 445
 NAS_CONFIG = {
     "share": "wrkgrp33",
-    "source_path": "Finance Data and Analytics/DSA/AEGIS/Transcripts/database_refresh",
+    "source_path": "Finance Data and Analytics/DSA/AEGIS/Transcripts/data",
     "output_path": "Finance Data and Analytics/DSA/AEGIS/Transcripts",
     "master_db_filename": "master_database.csv",
     "database_folder": "database",
-    "refresh_outputs_folder": "refresh_outputs",
-    "logs_folder": "logs"
+    "refresh_outputs_folder": "database_refresh",
+    "logs_folder": "database_refresh/logs"
 }
 
 # Processing Configuration
