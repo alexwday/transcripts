@@ -191,6 +191,11 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# Suppress SMB logging which is very verbose and includes expected errors
+logging.getLogger('nmb.NetBIOS').setLevel(logging.ERROR)
+logging.getLogger('smb.SMBConnection').setLevel(logging.ERROR)
+logging.getLogger('smb.smb_structs').setLevel(logging.ERROR)
+
 # Debug output directory
 DEBUG_OUTPUT_DIR = "/tmp/transcript_debug" if DEBUG_MODE else None
 if DEBUG_MODE and DEBUG_SAVE_INTERMEDIATES:
@@ -1361,28 +1366,54 @@ Scoring guidelines:
 # ========================================
 
 def read_master_database(nas_conn: SMBConnection) -> pd.DataFrame:
-    """Read master database CSV from NAS"""
+    """Read master database CSV from NAS (mirrors PostgreSQL schema)"""
     try:
+        # Suppress SMB connection logging for file existence check
+        old_level = logging.getLogger('smb.SMBConnection').level
+        logging.getLogger('smb.SMBConnection').setLevel(logging.CRITICAL)
+        
         csv_content = download_file_from_nas(
             nas_conn, 
             DEST_CONFIG['share'], 
             DEST_CONFIG['master_db_path']
         )
+        
+        # Restore logging level
+        logging.getLogger('smb.SMBConnection').setLevel(old_level)
+        
         df = pd.read_csv(csv_content)
-        logger.info(f"Read master database with {len(df)} records")
+        if DEBUG_MODE:
+            logger.info(f"✓ Loaded master database: {len(df)} section records")
+        else:
+            logger.info(f"Read master database with {len(df)} records")
         return df
     except OperationFailure:
-        # File doesn't exist, create empty dataframe
-        logger.info("Master database not found, creating new one")
+        # File doesn't exist, create empty dataframe with PostgreSQL schema
+        if DEBUG_MODE:
+            logger.info("⚠ Master database not found, creating new one")
+        else:
+            logger.info("Master database not found, creating new one")
+        
         return pd.DataFrame(columns=[
-            'filepath', 'filename', 'bank_name', 'ticker_region', 'fiscal_year', 'quarter',
-            'last_modified', 'last_processed', 'status', 'error_message',
-            'processing_time_seconds', 'section_count', 'primary_sections', 'total_tokens'
+            # File metadata
+            'fiscal_year', 'quarter', 'bank_name', 'ticker_region', 'filepath', 'filename', 'date_last_modified',
+            # Hierarchical classification  
+            'primary_section_type', 'primary_section_summary', 'secondary_section_type', 'secondary_section_summary',
+            # Content and search data
+            'section_content', 'section_order', 'section_tokens', 'section_embedding',
+            # Reranking scores
+            'importance_score', 'preceding_context_relevance', 'following_context_relevance',
+            # Metadata
+            'created_at', 'updated_at'
         ])
 
 def update_master_database(nas_conn: SMBConnection, df: pd.DataFrame):
     """Write master database CSV to NAS"""
     try:
+        # Suppress SMB logging for upload
+        old_level = logging.getLogger('smb.SMBConnection').level
+        logging.getLogger('smb.SMBConnection').setLevel(logging.CRITICAL)
+        
         # Convert to CSV
         csv_buffer = BytesIO()
         df.to_csv(csv_buffer, index=False)
@@ -1395,7 +1426,14 @@ def update_master_database(nas_conn: SMBConnection, df: pd.DataFrame):
             DEST_CONFIG['master_db_path'],
             csv_content
         )
-        logger.info("Updated master database on NAS")
+        
+        # Restore logging level
+        logging.getLogger('smb.SMBConnection').setLevel(old_level)
+        
+        if DEBUG_MODE:
+            logger.info(f"✓ Updated master database: {len(df)} section records")
+        else:
+            logger.info("Updated master database on NAS")
     except Exception as e:
         logger.error(f"Failed to update master database: {str(e)}")
 
@@ -1491,8 +1529,8 @@ def compare_files_with_master(current_files: Dict, master_df: pd.DataFrame) -> D
         row = master_df[master_df['filepath'] == filepath].iloc[0]
         current_modified = current_files[filepath]['last_modified']
         
-        if pd.notna(row['last_modified']):
-            master_modified = pd.to_datetime(row['last_modified'])
+        if pd.notna(row['date_last_modified']):
+            master_modified = pd.to_datetime(row['date_last_modified'])
             # Ensure current_modified is also a datetime for comparison
             current_modified_dt = pd.to_datetime(current_modified)
             
