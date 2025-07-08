@@ -1,25 +1,64 @@
 # Bank Transcript Database Project
 
 ## Project Overview
-Two-stage system for creating comprehensive databases from Canadian and US bank earnings call transcripts:
+Multi-stage system for creating comprehensive databases from Canadian and US bank earnings call transcripts:
 
 1. **Stage 1**: File aggregation and organization ✅ COMPLETED
-2. **Stage 2**: Database processing and retrieval system 🔄 IN PROGRESS
+2. **Stage 2**: File management and database initialization ✅ COMPLETED  
+3. **Stage 3+**: PDF processing and database creation 🔄 PLANNED
 
 ## Stage 1: File Aggregation (COMPLETED)
 
 ### Location
 `stage1-file-aggregation/` directory contains complete implementation
 
+### Features
+- **Enhanced logging** with step-by-step progress indicators and comprehensive error tracking
+- **Dual log system** - console output plus detailed logs written to `logs/` folder
+- **Execution timing** and detailed statistics
+- **Robust error handling** with try-catch blocks for each major step
+
 ### Data Flow
 ```
 Source NAS → database_refresh/YYYY/QX/transcript.pdf
 ```
 
-## Stage 2: Database Processing (IN PROGRESS)
+## Stage 2: File Management (COMPLETED)
+
+### Location
+`stage2-database-processing/file_management.py`
+
+### Purpose
+Focused file comparison and master database management:
+- Checks if master database exists, creates if needed
+- Compares NAS files with master database records
+- Identifies new, modified, and deleted files
+- Outputs organized file lists for processing stages
+
+### Folder Structure
+```
+Transcripts/
+├── database_refresh/     # PDF files from Stage 1 (input)
+├── database/            # Master database storage
+│   └── master_database.csv
+├── refresh_outputs/     # Processing pipeline outputs
+│   ├── 01_files_to_add.json
+│   └── 02_files_to_delete.json
+└── logs/               # Error and summary logs
+    ├── stage1_*.log
+    └── stage2_*.log
+```
+
+### Features
+- **Comprehensive logging** matching Stage 1 standards
+- **Execution timing** and detailed statistics
+- **Error and warning tracking** with permanent log files
+- **Ordered outputs** for pipeline processing
+
+## Stage 3+: Database Processing (PLANNED)
 
 ### Overview
-Transforms PDF transcripts into a searchable PostgreSQL database with:
+Will transform PDF transcripts into a searchable PostgreSQL database with:
 - Hierarchical section classification (primary/secondary)
 - Vector embeddings for similarity search
 - Three-path retrieval system optimized for different query types
@@ -72,24 +111,32 @@ Analyzes queries to select optimal path:
 - Gap filling maintains narrative continuity
 
 ### Implementation Files
-- `stage2-database-processing/final_schema.sql` - PostgreSQL schema
-- `stage2-database-processing/retrieval_flow_detailed.md` - Complete retrieval documentation
-- `stage2-database-processing/README.md` - Stage 2 overview
+- `final_schema.sql` - PostgreSQL schema design
+- `retrieval_flow_detailed.md` - Complete retrieval documentation
+- `stage2-database-processing/README.md` - Stage 2+ overview
+- `stage2-database-processing/file_management.py` - Current Stage 2 implementation
+- `reference/transcript_processor.py` - Comprehensive processor reference for future stages
 
 ### Next Steps
-1. Implement PDF text extraction
-2. Build LLM section identification
-3. Create embedding generation
-4. Develop retrieval API
-5. Build synthesis layer
+1. **Stage 3**: PDF text extraction and bank identification
+2. **Stage 4**: Primary section classification  
+3. **Stage 5**: Secondary section generation (chunking)
+4. **Stage 6**: Enhancement with summaries, embeddings, and scores
+5. **Stage 7**: Database update and master database management
+6. **Future**: Retrieval API and synthesis layer
 
 ## Project Structure
 ```
 transcripts/
-├── stage1-file-aggregation/     # Complete file aggregation
-├── stage2-database-processing/  # Database and retrieval system
-│   ├── final_schema.sql
-│   ├── retrieval_flow_detailed.md
+├── stage1-file-aggregation/          # Complete file aggregation
+│   ├── transcript_aggregator.py      # Enhanced with comprehensive logging
 │   └── README.md
-└── CLAUDE.md                   # This file
+├── stage2-database-processing/       # Database creation pipeline
+│   ├── file_management.py           # Current: File comparison & DB init
+│   └── README.md                    # Stage 2+ overview
+├── reference/                       # Reference implementations
+│   └── transcript_processor.py      # Comprehensive processor reference
+├── final_schema.sql                 # PostgreSQL schema design
+├── retrieval_flow_detailed.md       # Future retrieval system
+└── CLAUDE.md                        # This file
 ```

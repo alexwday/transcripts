@@ -1,8 +1,32 @@
-# Stage 2: Database Processing Pipeline
+# Stage 2+: Database Processing Pipeline
 
 ## Overview
 
-Stage 2 transforms PDF transcript files from Stage 1 into a searchable PostgreSQL database with intelligent chunking, embeddings, and a multi-path retrieval system.
+Stage 2+ encompasses the multi-stage pipeline for transforming PDF transcript files from Stage 1 into a searchable PostgreSQL database with intelligent chunking, embeddings, and a multi-path retrieval system.
+
+## Current Implementation Status
+
+### ✅ Stage 2: File Management (COMPLETED)
+**File**: `file_management.py`
+
+**Purpose**: File comparison and master database initialization
+- Checks if master database exists, creates if needed
+- Compares NAS files with master database records  
+- Identifies new, modified, and deleted files
+- Outputs organized file lists for processing stages
+
+**Features**:
+- Comprehensive logging with step-by-step progress indicators
+- Execution timing and detailed statistics
+- Error and warning tracking with permanent log files
+- Ordered outputs for pipeline processing
+
+### 🔄 Stages 3-7: Database Creation (PLANNED)
+- **Stage 3**: PDF text extraction and bank identification
+- **Stage 4**: Primary section classification
+- **Stage 5**: Secondary section generation (chunking)
+- **Stage 6**: Enhancement with summaries, embeddings, and scores
+- **Stage 7**: Database update and master database management
 
 ## System Architecture
 
@@ -10,7 +34,12 @@ Stage 2 transforms PDF transcript files from Stage 1 into a searchable PostgreSQ
 - PDF files from Stage 1: `/database_refresh/YYYY/QX/transcript.pdf`
 - Files contain Canadian and US bank earnings call transcripts
 
-### Output
+### Current Output (Stage 2)
+- Master database: `/database/master_database.csv`
+- Processing lists: `/refresh_outputs/01_files_to_add.json`, `/refresh_outputs/02_files_to_delete.json`
+- Logs: `/logs/stage2_*.log`
+
+### Future Output (Stages 3-7)
 - PostgreSQL database with hierarchical sections
 - Vector embeddings for similarity search
 - Three retrieval paths optimized for different query types
@@ -145,22 +174,48 @@ Analyzes user queries and selects optimal retrieval path:
 4. **Context Awareness**: Automatic neighbor inclusion
 5. **Gap Filling**: Maintains narrative continuity
 
+## Folder Structure
+```
+Transcripts/
+├── database_refresh/     # PDF files from Stage 1 (input)
+├── database/            # Master database storage
+│   └── master_database.csv
+├── refresh_outputs/     # Processing pipeline outputs
+│   ├── 01_files_to_add.json    # New + modified files to process
+│   └── 02_files_to_delete.json # Files to remove from master
+└── logs/               # Error and summary logs
+    ├── stage1_*.log
+    └── stage2_*.log
+```
+
 ## Implementation Status
 
-- ✅ Database schema designed
-- ✅ Retrieval flow architected
-- 🔄 PDF processing implementation pending
-- 🔄 LLM integration pending
-- 🔄 API development pending
+### Completed
+- ✅ **Database schema designed** (`../final_schema.sql`)
+- ✅ **Retrieval flow architected** (`../retrieval_flow_detailed.md`)
+- ✅ **Stage 2 file management** (`file_management.py`)
+- ✅ **Modular pipeline approach** with ordered outputs
+- ✅ **Comprehensive logging** and error tracking
+- ✅ **Master database initialization** and management
+- ✅ **Reference implementation** (`../reference/transcript_processor.py`)
+
+### Planned (Stages 3-7)
+- 🔄 **PDF processing implementation** (Stage 3)
+- 🔄 **LLM section identification** (Stage 4)
+- 🔄 **Secondary section generation** (Stage 5)
+- 🔄 **Enhancement pipeline** (Stage 6)
+- 🔄 **Database update system** (Stage 7)
+- 🔄 **API development** (Future)
 
 ## Next Steps
 
-1. Implement PDF text extraction
-2. Build LLM section identification pipeline
-3. Create embedding generation system
-4. Develop retrieval API
-5. Build synthesis layer
+1. **Stage 3**: Implement PDF text extraction and bank identification
+2. **Stage 4**: Build LLM primary section identification pipeline
+3. **Stage 5**: Create secondary section generation (chunking)
+4. **Stage 6**: Implement summaries, embeddings, and scoring
+5. **Stage 7**: Build database update and master database management
+6. **Future**: Develop retrieval API and synthesis layer
 
 ## Configuration
 
-Update NAS credentials and paths in `config.py` before running.
+Update NAS credentials and paths in each stage script before running. All configuration is at the top of each Python file following the established pattern from Stage 1.

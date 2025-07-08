@@ -56,7 +56,9 @@ DEST_NAS_IP = "192.168.2.100"  # Replace with actual IP
 DEST_NAS_PORT = 445
 DEST_CONFIG = {
     "share": "wrkgrp33",
-    "base_path": "Finance Data and Analytics/DSA/AEGIS/Transcripts/database_refresh"
+    "base_path": "Finance Data and Analytics/DSA/AEGIS/Transcripts/database_refresh",
+    "output_path": "Finance Data and Analytics/DSA/AEGIS/Transcripts",
+    "logs_folder": "logs"
 }
 
 # Processing Configuration
@@ -74,6 +76,11 @@ logging.basicConfig(
     datefmt='%Y-%m-%d %H:%M:%S'
 )
 logger = logging.getLogger(__name__)
+
+# Suppress SMB logging which is very verbose
+logging.getLogger('nmb.NetBIOS').setLevel(logging.ERROR)
+logging.getLogger('smb.SMBConnection').setLevel(logging.ERROR)
+logging.getLogger('smb.smb_structs').setLevel(logging.ERROR)
 
 # ========================================
 # HELPER FUNCTIONS
@@ -338,36 +345,99 @@ def copy_file(source_conn: SMBConnection, dest_conn: SMBConnection,
         logger.error(f"Failed to copy {source_path} to {dest_path}: {str(e)}")
         return False
 
-def write_error_log(dest_conn: SMBConnection, errors: List[str]):
-    """Write error log to NAS"""
-    if not errors:
+def write_error_log(dest_conn: SMBConnection, errors: List[str], warnings: List[str] = None):
+    """Write error and warning log to NAS logs folder"""
+    if not errors and not warnings:
         return
     
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    log_filename = f"transcript_sync_errors_{timestamp}.log"
-    log_path = f"{DEST_CONFIG['base_path']}/{log_filename}"
-    
-    log_content = f"Transcript Sync Error Log - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
-    log_content += "=" * 60 + "\n\n"
-    
-    for error in errors:
-        log_content += f"{error}\n"
-    
     try:
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        log_filename = f"stage1_transcript_aggregator_{timestamp}.log"
+        logs_path = f"{DEST_CONFIG['output_path']}/{DEST_CONFIG['logs_folder']}"
+        log_file_path = f"{logs_path}/{log_filename}"
+        
+        # Ensure logs directory exists
+        ensure_directory_exists(dest_conn, DEST_CONFIG['share'], logs_path)
+        
+        # Build log content
+        log_content = f"Stage 1 Transcript Aggregator Log - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+        log_content += "=" * 60 + "\n\n"
+        
+        if errors:
+            log_content += f"ERRORS ({len(errors)}):\n"
+            log_content += "-" * 20 + "\n"
+            for i, error in enumerate(errors, 1):
+                log_content += f"{i}. {error}\n"
+            log_content += "\n"
+        
+        if warnings:
+            log_content += f"WARNINGS ({len(warnings)}):\n"
+            log_content += "-" * 20 + "\n"
+            for i, warning in enumerate(warnings, 1):
+                log_content += f"{i}. {warning}\n"
+            log_content += "\n"
+        
+        # Upload log file
         from io import BytesIO
         log_file = BytesIO(log_content.encode('utf-8'))
-        dest_conn.storeFile(DEST_CONFIG['share'], log_path, log_file)
+        dest_conn.storeFile(DEST_CONFIG['share'], log_file_path, log_file)
         log_file.close()
-        logger.info(f"Error log written to: {log_path}")
+        logger.info(f"Error log written to: {log_file_path}")
+        
     except Exception as e:
         logger.error(f"Failed to write error log: {str(e)}")
 
+def write_summary_log(dest_conn: SMBConnection, summary_stats: Dict):
+    """Write processing summary log to NAS logs folder"""
+    try:
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        log_filename = f"stage1_summary_{timestamp}.log"
+        logs_path = f"{DEST_CONFIG['output_path']}/{DEST_CONFIG['logs_folder']}"
+        log_file_path = f"{logs_path}/{log_filename}"
+        
+        # Ensure logs directory exists
+        ensure_directory_exists(dest_conn, DEST_CONFIG['share'], logs_path)
+        
+        # Build summary content
+        log_content = f"Stage 1 Transcript Aggregator Summary - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+        log_content += "=" * 60 + "\n\n"
+        
+        log_content += "PROCESSING RESULTS:\n"
+        log_content += "-" * 20 + "\n"
+        for key, value in summary_stats.items():
+            log_content += f"{key}: {value}\n"
+        log_content += "\n"
+        
+        log_content += "FILE TRANSFER SUMMARY:\n"
+        log_content += "-" * 20 + "\n"
+        if 'new_files_copied' in summary_stats:
+            log_content += f"New files copied: {summary_stats['new_files_copied']}\n"
+        if 'updated_files_copied' in summary_stats:
+            log_content += f"Updated files copied: {summary_stats['updated_files_copied']}\n"
+        if 'total_source_files' in summary_stats:
+            log_content += f"Total source files: {summary_stats['total_source_files']}\n"
+        if 'existing_destination_files' in summary_stats:
+            log_content += f"Existing destination files: {summary_stats['existing_destination_files']}\n"
+        
+        # Upload summary log
+        from io import BytesIO
+        log_file = BytesIO(log_content.encode('utf-8'))
+        dest_conn.storeFile(DEST_CONFIG['share'], log_file_path, log_file)
+        log_file.close()
+        logger.info(f"Summary log written to: {log_file_path}")
+        
+    except Exception as e:
+        logger.error(f"Failed to write summary log: {str(e)}")
+        # Don't raise here as this is just logging
+
 def main():
     """Main execution function"""
-    logger.info("Starting Bank Transcript Aggregator")
-    logger.info("=" * 60)
+    start_time = datetime.now()
+    logger.info("Starting Stage 1: Bank Transcript Aggregator")
+    logger.info("=" * 50)
     
     errors = []
+    warnings = []
     stats = {
         'new_files': 0,
         'updated_files': 0,
@@ -379,97 +449,202 @@ def main():
     dest_conn = None
     
     try:
-        # Connect to source NAS
-        logger.info(f"Connecting to source NAS ({SOURCE_NAS_IP})...")
-        source_conn = create_smb_connection(SOURCE_NAS_IP, NAS_USERNAME, NAS_PASSWORD, SOURCE_NAS_PORT)
+        # Step 1: Connect to source NAS
+        logger.info("Step 1: Connecting to Source NAS")
+        try:
+            logger.info(f"Connecting to source NAS ({SOURCE_NAS_IP})...")
+            source_conn = create_smb_connection(SOURCE_NAS_IP, NAS_USERNAME, NAS_PASSWORD, SOURCE_NAS_PORT)
+            logger.info("✓ Source NAS connection established successfully")
+        except Exception as e:
+            error_msg = f"Failed to connect to source NAS: {str(e)}"
+            logger.error(error_msg)
+            errors.append(error_msg)
+            raise
         
-        # Connect to destination NAS
-        logger.info(f"Connecting to destination NAS ({DEST_NAS_IP})...")
-        dest_conn = create_smb_connection(DEST_NAS_IP, NAS_USERNAME, NAS_PASSWORD, DEST_NAS_PORT)
+        # Step 2: Connect to destination NAS
+        logger.info("\nStep 2: Connecting to Destination NAS")
+        try:
+            logger.info(f"Connecting to destination NAS ({DEST_NAS_IP})...")
+            dest_conn = create_smb_connection(DEST_NAS_IP, NAS_USERNAME, NAS_PASSWORD, DEST_NAS_PORT)
+            logger.info("✓ Destination NAS connection established successfully")
+        except Exception as e:
+            error_msg = f"Failed to connect to destination NAS: {str(e)}"
+            logger.error(error_msg)
+            errors.append(error_msg)
+            raise
         
-        # Scan destination for existing files
-        existing_files = scan_destination(dest_conn, DEST_CONFIG['share'], DEST_CONFIG['base_path'])
+        # Step 3: Scan destination for existing files
+        logger.info("\nStep 3: Scanning Destination for Existing Files")
+        try:
+            existing_files = scan_destination(dest_conn, DEST_CONFIG['share'], DEST_CONFIG['base_path'])
+            logger.info(f"✓ Found {len(existing_files)} existing files in destination")
+        except Exception as e:
+            error_msg = f"Failed to scan destination: {str(e)}"
+            logger.error(error_msg)
+            errors.append(error_msg)
+            raise
         
-        # Scan both sources
+        # Step 4: Scan source locations
+        logger.info("\nStep 4: Scanning Source Locations")
         all_source_files = {}
         
-        # Canadian banks
-        canadian_files = scan_source(source_conn, CANADIAN_CONFIG, CANADIAN_CONFIG['target_folders'])
-        all_source_files.update(canadian_files)
-        
-        # US banks
-        us_files = scan_source(source_conn, US_CONFIG, US_CONFIG['target_folders'])
-        all_source_files.update(us_files)
-        
-        logger.info(f"\nTotal source files found: {len(all_source_files)}")
-        logger.info(f"Existing destination files: {len(existing_files)}")
-        
-        # Compare and process files
-        files_to_copy = []
-        
-        for key, source_info in all_source_files.items():
-            if key not in existing_files:
-                # New file
-                files_to_copy.append((key, source_info, 'new'))
-                stats['new_files'] += 1
-            elif source_info['last_modified'] > existing_files[key]['last_modified']:
-                # Updated file
-                files_to_copy.append((key, source_info, 'updated'))
-                stats['updated_files'] += 1
-        
-        logger.info(f"\nFiles to process: {len(files_to_copy)}")
-        logger.info(f"  - New files: {stats['new_files']}")
-        logger.info(f"  - Updated files: {stats['updated_files']}")
-        
-        # Copy files
-        if files_to_copy:
-            logger.info("\nStarting file copy process...")
+        try:
+            # Canadian banks
+            logger.info("Scanning Canadian banks...")
+            canadian_files = scan_source(source_conn, CANADIAN_CONFIG, CANADIAN_CONFIG['target_folders'])
+            all_source_files.update(canadian_files)
+            logger.info(f"✓ Found {len(canadian_files)} Canadian bank files")
             
-            for i, (key, source_info, status) in enumerate(files_to_copy, 1):
-                year, quarter, filename = key.split('/')
-                dest_path = f"{DEST_CONFIG['base_path']}/{year}/{quarter}/{filename}"
+            # US banks
+            logger.info("Scanning US banks...")
+            us_files = scan_source(source_conn, US_CONFIG, US_CONFIG['target_folders'])
+            all_source_files.update(us_files)
+            logger.info(f"✓ Found {len(us_files)} US bank files")
+            
+            logger.info(f"✓ Total source files found: {len(all_source_files)}")
+            
+            if len(all_source_files) == 0:
+                warning_msg = "No transcript files found in any source locations"
+                logger.warning(warning_msg)
+                warnings.append(warning_msg)
                 
-                logger.info(f"[{i}/{len(files_to_copy)}] Copying {status} file: {filename} ({source_info['source']})")
-                
-                success = copy_file(
-                    source_conn, dest_conn,
-                    source_info['share'], DEST_CONFIG['share'],
-                    source_info['path'], dest_path
-                )
-                
-                if success:
-                    stats['total_processed'] += 1
-                else:
-                    stats['failed_copies'] += 1
-                    error_msg = f"Failed to copy: {source_info['path']} -> {dest_path}"
-                    errors.append(error_msg)
-        else:
-            logger.info("\nNo files to copy - destination is up to date")
+        except Exception as e:
+            error_msg = f"Failed to scan source locations: {str(e)}"
+            logger.error(error_msg)
+            errors.append(error_msg)
+            raise
         
-        # Write error log if needed
-        if errors:
-            write_error_log(dest_conn, errors)
+        # Step 5: Compare and identify files to process
+        logger.info("\nStep 5: Comparing Files and Identifying Changes")
+        try:
+            files_to_copy = []
+            
+            for key, source_info in all_source_files.items():
+                if key not in existing_files:
+                    # New file
+                    files_to_copy.append((key, source_info, 'new'))
+                    stats['new_files'] += 1
+                elif source_info['last_modified'] > existing_files[key]['last_modified']:
+                    # Updated file
+                    files_to_copy.append((key, source_info, 'updated'))
+                    stats['updated_files'] += 1
+            
+            logger.info("✓ File comparison completed successfully")
+            logger.info(f"  - Files to process: {len(files_to_copy)}")
+            logger.info(f"  - New files: {stats['new_files']}")
+            logger.info(f"  - Updated files: {stats['updated_files']}")
+            
+            if len(files_to_copy) == 0:
+                logger.info("  - No files require copying")
+            
+        except Exception as e:
+            error_msg = f"Failed to compare files: {str(e)}"
+            logger.error(error_msg)
+            errors.append(error_msg)
+            raise
+        
+        # Step 6: Copy files
+        if files_to_copy:
+            logger.info("\nStep 6: Copying Files")
+            try:
+                logger.info(f"Starting file copy process for {len(files_to_copy)} files...")
+                
+                for i, (key, source_info, status) in enumerate(files_to_copy, 1):
+                    year, quarter, filename = key.split('/')
+                    dest_path = f"{DEST_CONFIG['base_path']}/{year}/{quarter}/{filename}"
+                    
+                    logger.info(f"[{i}/{len(files_to_copy)}] Copying {status} file: {filename} ({source_info['source']})")
+                    
+                    success = copy_file(
+                        source_conn, dest_conn,
+                        source_info['share'], DEST_CONFIG['share'],
+                        source_info['path'], dest_path
+                    )
+                    
+                    if success:
+                        stats['total_processed'] += 1
+                        logger.info(f"  ✓ Successfully copied {filename}")
+                    else:
+                        stats['failed_copies'] += 1
+                        error_msg = f"Failed to copy: {source_info['path']} -> {dest_path}"
+                        logger.error(f"  ✗ {error_msg}")
+                        errors.append(error_msg)
+                
+                logger.info("✓ File copy process completed")
+                
+            except Exception as e:
+                error_msg = f"Failed during file copy process: {str(e)}"
+                logger.error(error_msg)
+                errors.append(error_msg)
+                raise
+        else:
+            logger.info("\nStep 6: No Files to Copy")
+            logger.info("✓ Destination is up to date")
+        
+        # Calculate execution time
+        execution_time = datetime.now() - start_time
+        
+        # Calculate successful copies
+        new_files_copied = max(0, stats['new_files'] - stats['failed_copies'])
+        updated_files_copied = max(0, stats['updated_files'] - stats['failed_copies'])
+        
+        # Prepare summary statistics
+        summary_stats = {
+            'execution_time': str(execution_time),
+            'start_time': start_time.strftime('%Y-%m-%d %H:%M:%S'),
+            'end_time': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+            'total_source_files': len(all_source_files),
+            'existing_destination_files': len(existing_files),
+            'files_to_copy': len(files_to_copy),
+            'new_files': stats['new_files'],
+            'updated_files': stats['updated_files'],
+            'new_files_copied': new_files_copied,
+            'updated_files_copied': updated_files_copied,
+            'failed_copies': stats['failed_copies'],
+            'total_processed': stats['total_processed'],
+            'errors': len(errors),
+            'warnings': len(warnings)
+        }
         
         # Summary
-        logger.info("\n" + "=" * 60)
-        logger.info("SYNC COMPLETE - Summary:")
-        logger.info(f"  - New files copied: {stats['new_files'] - (stats['failed_copies'] if stats['new_files'] > 0 else 0)}")
-        logger.info(f"  - Updated files copied: {stats['updated_files'] - (stats['failed_copies'] if stats['updated_files'] > 0 else 0)}")
+        logger.info("\n" + "=" * 50)
+        logger.info("STAGE 1 COMPLETE - Summary:")
+        logger.info(f"  - Execution time: {execution_time}")
+        logger.info(f"  - Total source files: {len(all_source_files)}")
+        logger.info(f"  - Existing destination files: {len(existing_files)}")
+        logger.info(f"  - New files copied: {new_files_copied}")
+        logger.info(f"  - Updated files copied: {updated_files_copied}")
         logger.info(f"  - Failed copies: {stats['failed_copies']}")
         logger.info(f"  - Total processed successfully: {stats['total_processed']}")
+        logger.info(f"  - Errors: {len(errors)}")
+        logger.info(f"  - Warnings: {len(warnings)}")
+        
+        # Write summary log
+        write_summary_log(dest_conn, summary_stats)
         
     except Exception as e:
-        logger.error(f"Critical error: {str(e)}")
-        errors.append(f"Critical error: {str(e)}")
+        error_msg = f"Critical error: {str(e)}"
+        logger.error(error_msg)
+        errors.append(error_msg)
+        
+        # Try to write error log even if there was a critical error
+        if dest_conn:
+            write_error_log(dest_conn, errors, warnings)
+        
+        raise
         
     finally:
+        # Write error log if there were any issues
+        if dest_conn and (errors or warnings):
+            write_error_log(dest_conn, errors, warnings)
+        
         # Clean up connections
         if source_conn:
             source_conn.close()
         if dest_conn:
             dest_conn.close()
         
-        logger.info("\nScript execution completed")
+        logger.info("\nStage 1 execution completed")
 
 if __name__ == "__main__":
     main()

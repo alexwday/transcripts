@@ -30,6 +30,14 @@ This stage handles the automated monitoring and aggregation of bank earnings cal
 - **Folder Creation**: Automatically creates year/quarter structure
 - **Error Handling**: Continues processing on individual file failures
 
+### Enhanced Logging & Monitoring
+- **Step-by-step progress** with ✓ checkmarks for successful operations
+- **Comprehensive error tracking** with detailed error collection throughout execution
+- **Execution timing** and performance metrics
+- **Dual log system**: Console output plus permanent logs in `logs/` folder
+- **Warning detection** for edge cases (no files found, connection issues)
+- **Detailed statistics** including file counts, processing time, and success rates
+
 ## Files
 
 ### `transcript_aggregator.py`
@@ -101,19 +109,33 @@ Add to cron for automated execution:
 ```
 
 ## Logging Output
-The script provides meaningful progress information:
-- Connection status to each NAS
-- File counts from each source location
-- Directory creation messages
-- File copy progress with [current/total] counters
-- Summary with new/updated/failed counts
-- Error log creation on NAS if failures occur
+The script provides comprehensive progress tracking:
+
+### Console Output
+- **Step-by-step process** with numbered steps (Step 1-6)
+- **Connection status** to each NAS with ✓ success indicators  
+- **File counts** from each source location
+- **Directory creation** messages
+- **File copy progress** with [current/total] counters and individual file status
+- **Detailed summary** with execution time, file counts, and error statistics
+
+### Log Files (in `logs/` folder)
+- **Error logs**: `stage1_transcript_aggregator_YYYYMMDD_HHMMSS.log`
+  - Contains all errors and warnings with timestamps
+  - Helps with troubleshooting file copy issues
+- **Summary logs**: `stage1_summary_YYYYMMDD_HHMMSS.log`
+  - Detailed execution statistics and timing
+  - File transfer summary with counts and results
+  - Always created on successful completion
 
 ## Error Handling
-- Individual file failures don't stop the entire process
-- Detailed error messages for troubleshooting
-- Error log written to NAS base directory if failures occur
-- Retry-friendly design for network issues
+- **Individual file failures** don't stop the entire process
+- **Comprehensive error collection** throughout execution with try-catch blocks for each major step
+- **Warning tracking** for edge cases (no files found, network issues)
+- **Detailed error messages** for troubleshooting with specific failure points
+- **Permanent error logs** written to dedicated `logs/` folder on NAS
+- **Retry-friendly design** for network issues
+- **Execution timing** for performance monitoring
 
 ## Testing
 - Update NAS IPs and credentials in configuration

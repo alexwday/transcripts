@@ -1,109 +1,189 @@
 # Bank Transcript Database Project
 
 ## Overview
-A two-stage system for creating comprehensive databases from Canadian and US bank earnings call transcripts, designed to support AI-powered financial research and chatbot applications.
+This project creates a comprehensive database system for analyzing Canadian and US bank earnings call transcripts using advanced NLP and vector search capabilities.
 
 ## Project Structure
 
 ```
 transcripts/
-├── README.md                          # This file - project overview
-├── CLAUDE.md                          # Context for future development sessions
-├── PROJECT_STATUS.md                  # Detailed status and next steps
-└── stage1-file-aggregation/           # ✅ COMPLETED
-    ├── transcript_aggregator.py       # Main aggregation script
-    └── README.md                      # Stage 1 documentation
+├── stage1-file-aggregation/          # ✅ COMPLETED
+│   ├── transcript_aggregator.py      # Enhanced file aggregation
+│   └── README.md                     # Stage 1 documentation
+├── stage2-database-processing/       # ✅ COMPLETED (Stage 2)
+│   ├── file_management.py           # File comparison & DB management
+│   └── README.md                    # Stage 2+ documentation
+├── reference/                       # Reference implementations
+│   └── transcript_processor.py      # Comprehensive processor reference
+├── final_schema.sql                 # PostgreSQL database schema
+├── retrieval_flow_detailed.md       # Future retrieval system architecture
+├── CLAUDE.md                        # Detailed technical documentation
+├── PROJECT_STATUS.md               # Comprehensive project status
+└── README.md                       # This file
 ```
 
 ## Stages
 
 ### Stage 1: File Aggregation ✅ COMPLETED
-**Purpose**: Monitor and aggregate bank transcript files from multiple NAS locations into a centralized, organized structure.
+**Location**: `stage1-file-aggregation/transcript_aggregator.py`
 
-**Status**: Production-ready (requires NAS credential configuration)
+Automated system for collecting and organizing PDF transcript files from multiple NAS sources into a centralized, standardized structure.
 
 **Key Features**:
-- Automated NAS monitoring with NTLM v2 authentication
-- Flexible pattern matching for various naming conventions
-- Smart deduplication using file timestamps
-- Comprehensive error handling and logging
-- Scheduled execution support
+- Monitors Canadian and US bank transcript folders
+- Handles various naming conventions across years
+- Smart deduplication based on timestamps
+- **Enhanced logging** with step-by-step progress tracking
+- **Comprehensive error handling** with permanent audit trails
+- **Dual log system** - console output plus detailed logs in `logs/` folder
+- Ready for scheduled automation
 
-### Stage 2: LLM Processing 🔄 UPCOMING
-**Purpose**: Process aggregated transcripts to create searchable databases using LLM models.
+### Stage 2: File Management ✅ COMPLETED
+**Location**: `stage2-database-processing/file_management.py`
+
+Focused file comparison and master database management system.
+
+**Key Features**:
+- Checks master database existence and creates if needed
+- Compares NAS files with master database records
+- Identifies new, modified, and deleted files
+- Outputs organized file lists for processing pipeline
+- **Comprehensive logging** with execution timing
+- **Ordered pipeline outputs** for subsequent stages
+
+### Stage 3+: Database Processing 🔄 PLANNED
+**Location**: `stage2-database-processing/` (future stages)
+
+Transforms organized PDF files into searchable databases with intelligent chunking and embeddings.
 
 **Planned Components**:
-- RAG database for semantic search
-- Structured database with tagged financial metrics
-- API layer for chatbot integration
-- Automated content analysis pipeline
+- **Stage 3**: PDF text extraction and bank identification
+- **Stage 4**: Primary section classification
+- **Stage 5**: Secondary section generation (chunking)
+- **Stage 6**: Enhancement with summaries, embeddings, and scoring
+- **Stage 7**: Database update and master database management
+- **Future**: Multi-path retrieval system
 
-## Quick Start
+## Architecture
+
+### Data Flow
+```
+NAS Sources → Stage 1 → database_refresh/YYYY/QX/file.pdf → Stage 2 → refresh_outputs/ → Stages 3-7 → PostgreSQL Database
+```
+
+### Folder Structure
+```
+Transcripts/
+├── database_refresh/     # PDF files from Stage 1 (input)
+├── database/            # Master database storage
+│   └── master_database.csv
+├── refresh_outputs/     # Processing pipeline outputs
+│   ├── 01_files_to_add.json
+│   └── 02_files_to_delete.json
+└── logs/               # Error and summary logs
+    ├── stage1_*.log
+    └── stage2_*.log
+```
+
+### Technology Stack
+- **File Processing**: Python, pysmb, PyPDF2
+- **Database**: PostgreSQL with pgvector extension
+- **LLM Integration**: OpenAI GPT-4 and embeddings
+- **Vector Search**: pgvector for similarity search
+- **Infrastructure**: NAS storage, automated scheduling
+
+## Getting Started
 
 ### Prerequisites
-```bash
-pip install pysmb
-```
+- Python 3.8+
+- NAS access credentials
+- PostgreSQL with pgvector extension (for future stages)
+- OpenAI API access (for future stages)
 
-### Configuration
-Update NAS credentials in `stage1-file-aggregation/transcript_aggregator.py`:
-```python
-NAS_USERNAME = "your_username"
-NAS_PASSWORD = "your_password"
-SOURCE_NAS_IP = "192.168.1.100"  # wrkgrp30
-DEST_NAS_IP = "192.168.2.100"    # wrkgrp33
-```
+### Stage 1 Setup
+1. Update NAS credentials in `stage1-file-aggregation/transcript_aggregator.py`
+2. Configure source and destination paths
+3. Run: `python transcript_aggregator.py`
+4. Schedule with cron for automation
 
-### Running Stage 1
-```bash
-cd stage1-file-aggregation
-python transcript_aggregator.py
-```
+### Stage 2 Setup
+1. Complete Stage 1 setup
+2. Update NAS credentials in `stage2-database-processing/file_management.py`
+3. Run: `python file_management.py`
+4. Review output files in `refresh_outputs/` folder
 
-## Data Sources
-- **Canadian Banks**: Major Canadian bank earnings calls (2020+)
-- **US Banks**: Major US bank earnings calls (2020+)
-- **Format**: PDF transcript files
-- **Frequency**: Quarterly earnings releases
+### Future Stages Setup
+1. Complete Stages 1-2
+2. Set up PostgreSQL with pgvector
+3. Configure OpenAI API credentials
+4. Implement Stages 3-7 following reference code in `reference/transcript_processor.py`
 
-## Technical Details
+## Current Status
 
-### Stage 1 Implementation
-- **Language**: Python 3.x
-- **NAS Protocol**: SMB/CIFS with NTLM v2
-- **File Handling**: Streaming operations with BytesIO
-- **Pattern Matching**: Flexible regex for folder naming variations
-- **Scheduling**: Cron/task scheduler compatible
+### Completed
+- ✅ **Stage 1**: File aggregation system with enhanced logging
+- ✅ **Stage 2**: File management and master database initialization
+- ✅ **Architecture**: Modular pipeline design with clean separation
+- ✅ **Logging**: Comprehensive error tracking and permanent audit trails
+- ✅ **Infrastructure**: Organized folder structure and data flow
 
-### Stage 2 Planning
-- **PDF Processing**: Text extraction and cleaning
-- **LLM Integration**: Financial text analysis and tagging
-- **Vector Database**: Semantic search capabilities
-- **Structured Database**: Financial metrics and time-series data
-- **APIs**: RESTful endpoints for downstream applications
+### In Progress
+- 🔄 **Stage 3**: PDF text extraction and bank identification
+- 🔄 **Stage 4**: Primary section classification
+- 🔄 **Stage 5**: Secondary section generation (chunking)
+- 🔄 **Stage 6**: Enhancement pipeline
+- 🔄 **Stage 7**: Database update system
 
-## Development Context
+### Planned
+- 📋 **PostgreSQL setup** with pgvector extension
+- 📋 **Vector search and retrieval system**
+- 📋 **API endpoints** for querying
+- 📋 **User interface** for search and analysis
 
-This project was developed to provide a comprehensive foundation for AI-powered financial research tools. Stage 1 handles the complex task of aggregating files from multiple sources with inconsistent naming conventions, while Stage 2 will focus on content processing and database creation.
+## Key Features
 
-### Key Design Decisions
-- **Flexible Pattern Matching**: Handles Q1, Q121, Q1 2020, Q1 2022 variations
-- **Normalized Output**: Consistent Q1-Q4 structure regardless of source naming
-- **Error Resilience**: Individual file failures don't stop the entire process
-- **Standalone Design**: Self-contained script with minimal dependencies
+### Enhanced Logging System
+- **Step-by-step progress tracking** with ✓ checkmarks
+- **Comprehensive error collection** with try-catch blocks for each major step
+- **Execution timing** and detailed statistics
+- **Permanent log files** in dedicated `logs/` folder
+- **Warning detection** for edge cases
 
-## Next Steps
+### Modular Architecture
+- **Focused stages** - each stage handles specific functionality
+- **Ordered outputs** - clear data flow between stages
+- **Clean separation** - inputs, database, outputs, and logs in separate folders
+- **Reference implementations** - comprehensive processor for future development
 
-1. **Deploy Stage 1**: Configure credentials and test in production environment
-2. **Plan Stage 2**: Select LLM models and database technologies
-3. **Design Schema**: Define metadata structure for financial content
-4. **Build Pipeline**: Implement PDF processing and content analysis
-5. **Create APIs**: Develop endpoints for chatbot integration
+### Production-Ready Design
+- **Robust error handling** with graceful degradation
+- **Comprehensive logging** for troubleshooting and monitoring
+- **Scheduled execution** support with cron compatibility
+- **Scalable architecture** for handling large volumes of files
 
 ## Documentation
-- Each stage has dedicated README files with detailed implementation notes
-- `PROJECT_STATUS.md` provides comprehensive status tracking
-- `CLAUDE.md` maintains context for future development sessions
 
-## Support
-This project is designed for financial institutions requiring automated transcript processing and analysis capabilities. The modular design allows for easy extension to additional data sources and analysis types.
+### Core Documentation
+- **`CLAUDE.md`**: Detailed technical documentation and project overview
+- **`PROJECT_STATUS.md`**: Comprehensive project status and progress tracking
+- **`final_schema.sql`**: PostgreSQL database schema design
+- **`retrieval_flow_detailed.md`**: Future retrieval system architecture
+
+### Stage-Specific Documentation
+- **`stage1-file-aggregation/README.md`**: Stage 1 implementation details
+- **`stage2-database-processing/README.md`**: Stage 2+ architecture and progress
+
+### Reference Materials
+- **`reference/transcript_processor.py`**: Comprehensive processor reference for future stages
+
+## Contributing
+
+This project follows a modular architecture with clear separation between stages. Each stage is designed to be:
+- **Self-contained** with minimal dependencies
+- **Thoroughly documented** and logged
+- **Testable** and maintainable
+- **Following established patterns** from previous stages
+
+## License
+
+Internal project - all rights reserved.

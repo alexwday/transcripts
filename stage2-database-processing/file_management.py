@@ -9,10 +9,11 @@ This stage:
 3. Compares files with master database
 4. Outputs organized file lists for processing stages
 
-Outputs to database_refresh folder:
-- 01_master_database.csv (created if not exists)
-- 02_files_to_add.json (new + modified files)  
-- 03_files_to_delete.json (files to remove from master)
+Outputs to refresh_outputs folder:
+- 01_files_to_add.json (new + modified files)  
+- 02_files_to_delete.json (files to remove from master)
+
+Master database location: database/master_database.csv (created if not exists)
 """
 
 import os
@@ -355,9 +356,7 @@ def save_output_to_nas(conn: SMBConnection, filename: str, data: any, data_type:
     file_path = f"{refresh_outputs_path}/{filename}"
     upload_file_to_nas(conn, NAS_CONFIG['share'], file_path, content)
 
-def copy_master_to_refresh_outputs(conn: SMBConnection, master_df: pd.DataFrame):
-    """Copy master database to refresh_outputs folder"""
-    save_output_to_nas(conn, "01_master_database.csv", master_df, "csv")
+# Removed copy_master_to_refresh_outputs function - master DB should stay in database/ folder only
 
 # ========================================
 # ERROR LOGGING
@@ -522,17 +521,13 @@ def main():
         # Step 4: Generate output files
         logger.info("\nStep 4: Generating Output Files")
         try:
-            # Copy master database to refresh_outputs folder
-            copy_master_to_refresh_outputs(nas_conn, master_df)
-            logger.info("✓ Copied master database to refresh_outputs folder")
-            
             # Save files to add (new + modified)
             files_to_add = file_comparison['new_files'] + file_comparison['modified_files']
-            save_output_to_nas(nas_conn, "02_files_to_add.json", files_to_add)
+            save_output_to_nas(nas_conn, "01_files_to_add.json", files_to_add)
             logger.info(f"✓ Saved {len(files_to_add)} files to add")
             
             # Save files to delete
-            save_output_to_nas(nas_conn, "03_files_to_delete.json", file_comparison['deleted_files'])
+            save_output_to_nas(nas_conn, "02_files_to_delete.json", file_comparison['deleted_files'])
             logger.info(f"✓ Saved {len(file_comparison['deleted_files'])} files to delete")
             
             logger.info("✓ All output files generated successfully")
@@ -576,9 +571,8 @@ def main():
         
         # Output files created
         logger.info("\nOutput files created in refresh_outputs folder:")
-        logger.info("  - 01_master_database.csv")
-        logger.info("  - 02_files_to_add.json")
-        logger.info("  - 03_files_to_delete.json")
+        logger.info("  - 01_files_to_add.json")
+        logger.info("  - 02_files_to_delete.json")
         logger.info(f"\nMaster database location: {NAS_CONFIG['database_folder']}/{NAS_CONFIG['master_db_filename']}")
         
         # Write summary log
