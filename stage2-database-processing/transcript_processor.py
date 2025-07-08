@@ -558,6 +558,9 @@ def extract_first_n_words(pages: List[Dict[str, Any]], n: int = 1000) -> str:
 
 def clean_transcript_text(text: str) -> str:
     """Clean and normalize transcript text"""
+    if not text:
+        return ""
+    
     # Remove multiple spaces
     text = re.sub(r'\s+', ' ', text)
     
@@ -568,9 +571,21 @@ def clean_transcript_text(text: str) -> str:
     # Remove disclaimer footers
     text = re.sub(r'(?i)this transcript.*?accuracy\.?', '', text)
     
-    # Normalize quotes
+    # Normalize quotes and escape problematic characters
     text = text.replace('"', '"').replace('"', '"')
     text = text.replace(''', "'").replace(''', "'")
+    
+    # Remove or replace characters that can cause JSON issues
+    text = text.replace('\\', ' ')  # Replace backslashes
+    text = text.replace('\n', ' ')  # Replace newlines with spaces
+    text = text.replace('\r', ' ')  # Replace carriage returns
+    text = text.replace('\t', ' ')  # Replace tabs with spaces
+    
+    # Remove control characters
+    text = re.sub(r'[\x00-\x1f\x7f-\x9f]', ' ', text)
+    
+    # Final cleanup
+    text = re.sub(r'\s+', ' ', text)  # Remove multiple spaces again
     
     return text.strip()
 
@@ -605,7 +620,8 @@ def count_tokens(text: str) -> int:
 def call_openai_with_retry(client: OpenAI, messages: List[Dict], 
                           model: str = COMPLETION_MODEL, 
                           response_format: Optional[Dict] = None,
-                          tools: Optional[List] = None) -> str:
+                          tools: Optional[List] = None,
+                          max_tokens: Optional[int] = None) -> str:
     """Call OpenAI API with retry logic and token refresh"""
     for attempt in range(MAX_RETRIES):
         try:
@@ -616,7 +632,8 @@ def call_openai_with_retry(client: OpenAI, messages: List[Dict],
             kwargs = {
                 "model": model,
                 "messages": messages,
-                "temperature": 0.1
+                "temperature": 0.1,
+                "max_tokens": max_tokens or 32768
             }
             
             if response_format:
@@ -757,7 +774,8 @@ Use the tool to return the detected bank name and your confidence level.
         response = call_openai_with_retry(
             client, 
             messages, 
-            tools=[bank_identification_tool]
+            tools=[bank_identification_tool],
+            max_tokens=4096
         )
         
         # Log the response
@@ -947,7 +965,8 @@ Instructions:
             response = call_openai_with_retry(
                 client, 
                 messages,
-                tools=[section_identification_tool]
+                tools=[section_identification_tool],
+                max_tokens=8192
             )
             
             # Save response only if intermediates enabled
@@ -1148,51 +1167,74 @@ Use the tool to return the secondary sections."""
         response = call_openai_with_retry(
             client, 
             messages,
-            tools=[section_breakdown_tool]
+            tools=[section_breakdown_tool],
+            max_tokens=32768
         )
         
-        result = json.loads(response)
-        sections_data = result.get('sections', [])
-        
-        secondary_sections = []
-        for section in sections_data:
-            secondary_sections.append({
-                'name': section['name'],
-                'content': clean_transcript_text(section['content']),
-                'rationale': section.get('rationale', '')
-            })
-        
-        # Log summary
-        logger.info(f"Created {len(secondary_sections)} secondary sections for {primary_type}")
-        
-        return secondary_sections
+        # Parse the tool call response with better error handling
+        try:
+            result = json.loads(response)
+            sections_data = result.get('sections', [])
+            
+            if not sections_data:
+                raise ValueError("No sections returned from tool call")
+            
+            secondary_sections = []
+            for section in sections_data:
+                # Validate required fields
+                if not all(key in section for key in ['name', 'content']):
+                    logger.warning(f"Skipping invalid section: {section}")
+                    continue
+                    
+                secondary_sections.append({
+                    'name': section['name'][:200],  # Limit name length
+                    'content': clean_transcript_text(section['content']),
+                    'rationale': section.get('rationale', '')[:500]  # Limit rationale length
+                })
+            
+            if not secondary_sections:
+                raise ValueError("No valid sections created after parsing")
+            
+            # Log summary
+            logger.info(f"Created {len(secondary_sections)} secondary sections for {primary_type}")
+            return secondary_sections
+            
+        except json.JSONDecodeError as json_error:
+            logger.error(f"JSON parsing error for {primary_type}: {json_error}")
+            logger.error(f"Raw response: {response[:500]}...")  # Log first 500 chars
+            # Fall through to fallback handling
+        except Exception as parse_error:
+            logger.error(f"Section parsing error for {primary_type}: {parse_error}")
+            # Fall through to fallback handling
         
     except Exception as e:
         logger.error(f"Error creating secondary sections for {primary_type}: {str(e)}")
-        # Fallback: split by paragraphs or return as single section
-        paragraphs = [p.strip() for p in truncated_content.split('\n\n') if p.strip()]
+    # Fallback: split by paragraphs or return as single section
+    logger.warning(f"Using fallback section creation for {primary_type}")
+    paragraphs = [p.strip() for p in truncated_content.split('\n\n') if p.strip()]
+    
+    if len(paragraphs) > 1:
+        # Create sections from paragraphs
+        secondary_sections = []
+        for i, para in enumerate(paragraphs[:5], 1):  # Max 5 sections
+            if len(para) > 50:  # Only substantial paragraphs
+                secondary_sections.append({
+                    'name': f"{primary_type} - Part {i}",
+                    'content': clean_transcript_text(para),
+                    'rationale': f'Paragraph-based division due to LLM parsing error'
+                })
         
-        if len(paragraphs) > 1:
-            # Create sections from paragraphs
-            secondary_sections = []
-            for i, para in enumerate(paragraphs[:5], 1):  # Max 5 sections
-                if len(para) > 50:  # Only substantial paragraphs
-                    secondary_sections.append({
-                        'name': f"{primary_type} - Part {i}",
-                        'content': clean_transcript_text(para),
-                        'rationale': f'Paragraph-based division due to parsing error'
-                    })
-            
-            if secondary_sections:
-                logger.warning(f"Used paragraph fallback for {primary_type}: {len(secondary_sections)} sections")
-                return secondary_sections
-        
-        # Final fallback: single section
-        return [{
-            'name': f"{primary_type} - Complete",
-            'content': clean_transcript_text(truncated_content),
-            'rationale': 'Single section fallback due to parsing error'
-        }]
+        if secondary_sections:
+            logger.warning(f"Used paragraph fallback for {primary_type}: {len(secondary_sections)} sections")
+            return secondary_sections
+    
+    # Final fallback: single section
+    logger.warning(f"Using single section fallback for {primary_type}")
+    return [{
+        'name': f"{primary_type} - Complete",
+        'content': clean_transcript_text(truncated_content),
+        'rationale': 'Single section fallback due to LLM parsing error'
+    }]
 
 # ========================================
 # SUMMARY AND SCORING
@@ -1224,7 +1266,7 @@ FORMAT: Return only the summary text with no additional formatting or preamble.
     ]
     
     try:
-        response = call_openai_with_retry(client, messages)
+        response = call_openai_with_retry(client, messages, max_tokens=2048)
         return response.strip()
     except Exception as e:
         logger.error(f"Error generating summary: {str(e)}")
@@ -1295,7 +1337,8 @@ Scoring guidelines:
         response = call_openai_with_retry(
             client, 
             messages,
-            tools=[scoring_tool]
+            tools=[scoring_tool],
+            max_tokens=1024
         )
         
         result = json.loads(response)
