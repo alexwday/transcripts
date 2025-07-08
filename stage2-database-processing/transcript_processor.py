@@ -1,0 +1,1417 @@
+#!/usr/bin/env python3
+"""
+Bank Earnings Call Transcript Processor - Stage 2 (Updated)
+Processes PDF transcripts from NAS into CSV master database with embeddings
+"""
+
+import os
+import sys
+import time
+import logging
+from datetime import datetime
+from collections import defaultdict
+from typing import Dict, List, Tuple, Optional, Any
+import hashlib
+from io import BytesIO
+import json
+import re
+from dataclasses import dataclass, asdict
+import csv
+import tempfile
+import requests
+
+# Core libraries
+import pandas as pd
+import numpy as np
+
+# pysmb imports
+try:
+    from smb.SMBConnection import SMBConnection
+    from smb.smb_structs import OperationFailure
+except ImportError:
+    print("ERROR: pysmb not installed. Please run: pip install pysmb")
+    sys.exit(1)
+
+# PDF processing
+try:
+    import PyPDF2
+    from PyPDF2 import PdfReader
+except ImportError:
+    print("ERROR: PyPDF2 not installed. Please run: pip install PyPDF2")
+    sys.exit(1)
+
+# OpenAI imports
+try:
+    import openai
+    from openai import OpenAI
+except ImportError:
+    print("ERROR: OpenAI not installed. Please run: pip install openai")
+    sys.exit(1)
+
+# Token counting
+try:
+    import tiktoken
+except ImportError:
+    print("WARNING: tiktoken not installed. Using fallback token counting. Run: pip install tiktoken")
+    tiktoken = None
+
+# ========================================
+# CONFIGURATION - MODIFY AS NEEDED
+# ========================================
+
+# NAS Authentication (reused from Stage 1)
+NAS_USERNAME = "your_username"
+NAS_PASSWORD = "your_password"
+CLIENT_MACHINE_NAME = "PYTHON_SCRIPT"
+SERVER_MACHINE_NAME = "NAS_SERVER"
+
+# Destination NAS Configuration
+DEST_NAS_IP = "192.168.2.100"
+DEST_NAS_PORT = 445
+DEST_CONFIG = {
+    "share": "wrkgrp33",
+    "base_path": "Finance Data and Analytics/DSA/AEGIS/Transcripts/database_refresh",
+    "master_db_path": "Finance Data and Analytics/DSA/AEGIS/Transcripts/master_database.csv",
+    "logs_path": "Finance Data and Analytics/DSA/AEGIS/Transcripts/logs"
+}
+
+# OAuth Configuration for OpenAI
+OAUTH_CONFIG = {
+    "auth_endpoint": "https://your-auth-endpoint.com/oauth/token",
+    "client_id": "your_client_id",
+    "client_secret": "your_client_secret",
+    "base_url": "https://your-openai-proxy.com/v1"
+}
+
+# OpenAI Configuration
+EMBEDDING_MODEL = "text-embedding-3-large"
+EMBEDDING_DIMENSIONS = 2000
+COMPLETION_MODEL = "gpt-4-turbo"
+MAX_RETRIES = 3
+RETRY_DELAY = 2
+
+# Processing Configuration
+BATCH_SIZE = 5  # Number of files to process in one run
+VALID_YEAR_RANGE = (2020, 2031)
+VALID_QUARTERS = ["Q1", "Q2", "Q3", "Q4"]
+FILE_EXTENSIONS = [".pdf", ".PDF"]
+
+# Token limits for different section types
+TOKEN_LIMITS = {
+    "primary_summary": 200,
+    "secondary_summary": 150,
+    "section_chunk": 800
+}
+
+# Primary sections to identify
+PRIMARY_SECTIONS = [
+    "Safe Harbor Statement",
+    "Introduction",
+    "Management Discussion",
+    "Financial Performance",
+    "Investor Q&A",
+    "Closing Remarks"
+]
+
+# Standardized bank mappings
+BANK_MAPPINGS = {
+    # Canadian Banks
+    "TD Bank": {"name": "TD Bank", "ticker_region": "TD:CAN"},
+    "Toronto-Dominion Bank": {"name": "TD Bank", "ticker_region": "TD:CAN"},
+    "Royal Bank of Canada": {"name": "RBC", "ticker_region": "RY:CAN"},
+    "RBC": {"name": "RBC", "ticker_region": "RY:CAN"},
+    "Bank of Montreal": {"name": "BMO", "ticker_region": "BMO:CAN"},
+    "BMO": {"name": "BMO", "ticker_region": "BMO:CAN"},
+    "Scotiabank": {"name": "Scotia", "ticker_region": "BNS:CAN"},
+    "Bank of Nova Scotia": {"name": "Scotia", "ticker_region": "BNS:CAN"},
+    "Canadian Imperial Bank of Commerce": {"name": "CIBC", "ticker_region": "CM:CAN"},
+    "CIBC": {"name": "CIBC", "ticker_region": "CM:CAN"},
+    "National Bank of Canada": {"name": "National Bank", "ticker_region": "NA:CAN"},
+    
+    # US Banks
+    "JPMorgan Chase": {"name": "JPMorgan", "ticker_region": "JPM:US"},
+    "JP Morgan": {"name": "JPMorgan", "ticker_region": "JPM:US"},
+    "Bank of America": {"name": "Bank of America", "ticker_region": "BAC:US"},
+    "Wells Fargo": {"name": "Wells Fargo", "ticker_region": "WFC:US"},
+    "Citigroup": {"name": "Citigroup", "ticker_region": "C:US"},
+    "Goldman Sachs": {"name": "Goldman Sachs", "ticker_region": "GS:US"},
+    "Morgan Stanley": {"name": "Morgan Stanley", "ticker_region": "MS:US"},
+    "U.S. Bancorp": {"name": "US Bank", "ticker_region": "USB:US"},
+    "PNC Financial": {"name": "PNC", "ticker_region": "PNC:US"},
+    "Truist Financial": {"name": "Truist", "ticker_region": "TFC:US"},
+}
+
+# ========================================
+# LOGGING SETUP
+# ========================================
+
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S'
+)
+logger = logging.getLogger(__name__)
+
+# ========================================
+# DATA CLASSES
+# ========================================
+
+@dataclass
+class TranscriptSection:
+    """Represents a section in the transcript"""
+    fiscal_year: int
+    quarter: str
+    bank_name: str
+    ticker_region: str
+    filepath: str
+    filename: str
+    date_last_modified: datetime
+    primary_section_type: str
+    primary_section_summary: str
+    secondary_section_type: str
+    secondary_section_summary: str
+    section_content: str
+    section_order: int
+    section_tokens: int
+    section_embedding: Optional[List[float]] = None
+    importance_score: Optional[float] = None
+    preceding_context_relevance: Optional[float] = None
+    following_context_relevance: Optional[float] = None
+
+@dataclass
+class ProcessingStatus:
+    """Track file processing status"""
+    filepath: str
+    status: str  # 'new', 'modified', 'processed', 'error'
+    last_processed: Optional[datetime] = None
+    error_message: Optional[str] = None
+    processing_time: Optional[float] = None
+    section_count: Optional[int] = None
+    primary_sections: Optional[List[str]] = None
+    total_tokens: Optional[int] = None
+
+@dataclass
+class BankInfo:
+    """Bank identification information"""
+    detected_name: str
+    standardized_name: str
+    ticker_region: str
+    confidence: float
+    recognized: bool
+
+# ========================================
+# HELPER FUNCTIONS - NAS OPERATIONS
+# ========================================
+
+def create_smb_connection(server_ip: str, username: str, password: str, port: int = 445) -> SMBConnection:
+    """Create and return an SMB connection"""
+    try:
+        conn = SMBConnection(username, password, CLIENT_MACHINE_NAME, SERVER_MACHINE_NAME, 
+                           use_ntlm_v2=True, is_direct_tcp=True)
+        connected = conn.connect(server_ip, port=port)
+        if connected:
+            logger.info(f"Successfully connected to {server_ip}:{port}")
+            return conn
+        else:
+            raise Exception(f"Failed to connect to {server_ip}:{port}")
+    except Exception as e:
+        logger.error(f"Connection error to {server_ip}:{port}: {str(e)}")
+        raise
+
+def download_file_from_nas(conn: SMBConnection, share: str, file_path: str) -> BytesIO:
+    """Download file from NAS to BytesIO buffer"""
+    try:
+        file_obj = BytesIO()
+        conn.retrieveFile(share, file_path, file_obj)
+        file_obj.seek(0)
+        return file_obj
+    except Exception as e:
+        logger.error(f"Error downloading file {file_path}: {str(e)}")
+        raise
+
+def upload_file_to_nas(conn: SMBConnection, share: str, file_path: str, content: bytes):
+    """Upload file to NAS"""
+    try:
+        file_obj = BytesIO(content)
+        conn.storeFile(share, file_path, file_obj)
+        file_obj.close()
+    except Exception as e:
+        logger.error(f"Error uploading file {file_path}: {str(e)}")
+        raise
+
+def ensure_directory_exists(conn: SMBConnection, share: str, path: str):
+    """Ensure directory exists on NAS, create if necessary"""
+    parts = path.split('/')
+    current_path = ""
+    
+    for part in parts:
+        if not part:
+            continue
+            
+        if current_path:
+            current_path = f"{current_path}/{part}"
+        else:
+            current_path = part
+        
+        try:
+            conn.listPath(share, current_path)
+        except OperationFailure:
+            try:
+                conn.createDirectory(share, current_path)
+                logger.info(f"Created directory: {current_path}")
+            except Exception as e:
+                logger.error(f"Failed to create directory {current_path}: {str(e)}")
+                raise
+
+# ========================================
+# OAUTH TOKEN GENERATION
+# ========================================
+
+def generate_oauth_token() -> str:
+    """Generate OAuth token for OpenAI API"""
+    try:
+        response = requests.post(
+            OAUTH_CONFIG["auth_endpoint"],
+            data={
+                "grant_type": "client_credentials",
+                "client_id": OAUTH_CONFIG["client_id"],
+                "client_secret": OAUTH_CONFIG["client_secret"]
+            },
+            headers={"Content-Type": "application/x-www-form-urlencoded"}
+        )
+        
+        if response.status_code == 200:
+            token_data = response.json()
+            return token_data.get("access_token")
+        else:
+            raise Exception(f"OAuth token generation failed: {response.status_code} - {response.text}")
+    
+    except Exception as e:
+        logger.error(f"Error generating OAuth token: {str(e)}")
+        raise
+
+def get_openai_client() -> OpenAI:
+    """Initialize OpenAI client with OAuth token"""
+    try:
+        token = generate_oauth_token()
+        client = OpenAI(
+            api_key=token,
+            base_url=OAUTH_CONFIG["base_url"]
+        )
+        return client
+    except Exception as e:
+        logger.error(f"Error initializing OpenAI client: {str(e)}")
+        raise
+
+# ========================================
+# HELPER FUNCTIONS - PDF PROCESSING
+# ========================================
+
+def extract_pdf_text_indexed(pdf_content: BytesIO) -> List[Dict[str, Any]]:
+    """Extract text from PDF with indexed lines and page numbers"""
+    pages = []
+    
+    try:
+        reader = PdfReader(pdf_content)
+        global_line_number = 0
+        
+        for page_num, page in enumerate(reader.pages):
+            text = page.extract_text()
+            
+            # Split into lines and create indexed structure
+            lines = text.split('\n')
+            page_data = {
+                'page_number': page_num + 1,
+                'lines': [],
+                'start_line': global_line_number + 1,
+                'end_line': global_line_number + len([l for l in lines if l.strip()])
+            }
+            
+            for line in lines:
+                if line.strip():  # Skip empty lines
+                    global_line_number += 1
+                    page_data['lines'].append({
+                        'global_line_number': global_line_number,
+                        'page_line_number': len(page_data['lines']) + 1,
+                        'text': line.strip()
+                    })
+            
+            pages.append(page_data)
+            
+        logger.info(f"Extracted indexed text from {len(pages)} pages, {global_line_number} lines total")
+        return pages
+        
+    except Exception as e:
+        logger.error(f"Error extracting PDF text: {str(e)}")
+        raise
+
+def extract_first_n_words(pages: List[Dict[str, Any]], n: int = 1000) -> str:
+    """Extract first N words from transcript"""
+    words = []
+    word_count = 0
+    
+    for page in pages:
+        for line in page['lines']:
+            line_words = line['text'].split()
+            for word in line_words:
+                if word_count >= n:
+                    break
+                words.append(word)
+                word_count += 1
+            if word_count >= n:
+                break
+        if word_count >= n:
+            break
+    
+    return ' '.join(words)
+
+def clean_transcript_text(text: str) -> str:
+    """Clean and normalize transcript text"""
+    # Remove multiple spaces
+    text = re.sub(r'\s+', ' ', text)
+    
+    # Remove page numbers and headers
+    text = re.sub(r'Page \d+ of \d+', '', text)
+    text = re.sub(r'\d{1,2}/\d{1,2}/\d{4}', '', text)
+    
+    # Remove disclaimer footers
+    text = re.sub(r'(?i)this transcript.*?accuracy\.?', '', text)
+    
+    # Normalize quotes
+    text = text.replace('"', '"').replace('"', '"')
+    text = text.replace(''', "'").replace(''', "'")
+    
+    return text.strip()
+
+# ========================================
+# TOKEN COUNTING
+# ========================================
+
+def count_tokens_tiktoken(text: str, model: str = "gpt-4") -> int:
+    """Count tokens using tiktoken"""
+    try:
+        encoding = tiktoken.encoding_for_model(model)
+        return len(encoding.encode(text))
+    except Exception as e:
+        logger.warning(f"Error with tiktoken: {str(e)}")
+        return count_tokens_fallback(text)
+
+def count_tokens_fallback(text: str) -> int:
+    """Fallback token counting (rough approximation)"""
+    return len(text) // 4
+
+def count_tokens(text: str) -> int:
+    """Count tokens with tiktoken fallback"""
+    if tiktoken:
+        return count_tokens_tiktoken(text)
+    else:
+        return count_tokens_fallback(text)
+
+# ========================================
+# OPENAI INTEGRATION
+# ========================================
+
+def call_openai_with_retry(client: OpenAI, messages: List[Dict], 
+                          model: str = COMPLETION_MODEL, 
+                          response_format: Optional[Dict] = None,
+                          tools: Optional[List] = None) -> str:
+    """Call OpenAI API with retry logic and token refresh"""
+    for attempt in range(MAX_RETRIES):
+        try:
+            # Regenerate client with fresh token for each attempt
+            if attempt > 0:
+                client = get_openai_client()
+            
+            kwargs = {
+                "model": model,
+                "messages": messages,
+                "temperature": 0.1
+            }
+            
+            if response_format:
+                kwargs["response_format"] = response_format
+            if tools:
+                kwargs["tools"] = tools
+                kwargs["tool_choice"] = "required"
+            
+            response = client.chat.completions.create(**kwargs)
+            
+            if tools:
+                # Return tool call result
+                tool_calls = response.choices[0].message.tool_calls
+                if tool_calls:
+                    return tool_calls[0].function.arguments
+            
+            return response.choices[0].message.content
+            
+        except Exception as e:
+            logger.warning(f"OpenAI API error (attempt {attempt + 1}): {str(e)}")
+            if attempt < MAX_RETRIES - 1:
+                time.sleep(RETRY_DELAY * (attempt + 1))
+            else:
+                raise
+
+def generate_embedding(client: OpenAI, text: str) -> List[float]:
+    """Generate embedding for text"""
+    try:
+        response = client.embeddings.create(
+            model=EMBEDDING_MODEL,
+            input=text,
+            dimensions=EMBEDDING_DIMENSIONS
+        )
+        return response.data[0].embedding
+    except Exception as e:
+        logger.error(f"Error generating embedding: {str(e)}")
+        raise
+
+# ========================================
+# BANK IDENTIFICATION
+# ========================================
+
+def identify_bank_name(first_words: str, client: OpenAI) -> BankInfo:
+    """Identify bank name from first 1000 words using LLM tool call"""
+    
+    # Create tool definition
+    bank_identification_tool = {
+        "type": "function",
+        "function": {
+            "name": "identify_bank",
+            "description": "Identify the bank name from transcript text",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "detected_bank_name": {
+                        "type": "string",
+                        "description": "The bank name as detected in the transcript"
+                    },
+                    "confidence": {
+                        "type": "number",
+                        "description": "Confidence score from 0.0 to 1.0"
+                    }
+                },
+                "required": ["detected_bank_name", "confidence"]
+            }
+        }
+    }
+    
+    # Create bank list for prompt
+    bank_list = "\n".join([f"- {name}" for name in BANK_MAPPINGS.keys()])
+    
+    prompt = f"""Analyze this earnings call transcript excerpt and identify the bank name.
+
+Expected banks (use exact names from this list if possible):
+{bank_list}
+
+Transcript excerpt (first 1000 words):
+{first_words}
+
+Look for:
+1. Company name in headers/titles
+2. Speaker introductions
+3. References to "we", "our bank", "our company"
+4. Stock ticker mentions
+5. Legal entity names
+
+Use the tool to return the detected bank name and your confidence level.
+"""
+
+    messages = [
+        {"role": "system", "content": "You are an expert at identifying financial institutions from earnings call transcripts."},
+        {"role": "user", "content": prompt}
+    ]
+    
+    try:
+        response = call_openai_with_retry(
+            client, 
+            messages, 
+            tools=[bank_identification_tool]
+        )
+        
+        result = json.loads(response)
+        detected_name = result.get("detected_bank_name", "").strip()
+        confidence = float(result.get("confidence", 0.0))
+        
+        # Check if detected name matches our mappings
+        standardized_info = None
+        for mapped_name, info in BANK_MAPPINGS.items():
+            if mapped_name.lower() in detected_name.lower() or detected_name.lower() in mapped_name.lower():
+                standardized_info = info
+                break
+        
+        if standardized_info:
+            return BankInfo(
+                detected_name=detected_name,
+                standardized_name=standardized_info["name"],
+                ticker_region=standardized_info["ticker_region"],
+                confidence=confidence,
+                recognized=True
+            )
+        else:
+            return BankInfo(
+                detected_name=detected_name,
+                standardized_name=detected_name,
+                ticker_region="UNKNOWN:UNKNOWN",
+                confidence=confidence,
+                recognized=False
+            )
+            
+    except Exception as e:
+        logger.error(f"Error identifying bank name: {str(e)}")
+        return BankInfo(
+            detected_name="ERROR",
+            standardized_name="ERROR",
+            ticker_region="ERROR:ERROR",
+            confidence=0.0,
+            recognized=False
+        )
+
+def identify_bank_with_retry(first_words: str, client: OpenAI) -> BankInfo:
+    """Identify bank name with retry logic"""
+    # First attempt
+    bank_info = identify_bank_name(first_words, client)
+    
+    # If not recognized, try once more
+    if not bank_info.recognized and bank_info.detected_name != "ERROR":
+        logger.info(f"Bank not recognized on first attempt: {bank_info.detected_name}. Retrying...")
+        bank_info = identify_bank_name(first_words, client)
+    
+    return bank_info
+
+# ========================================
+# PRIMARY SECTION IDENTIFICATION
+# ========================================
+
+def format_page_for_llm(page_data: Dict) -> str:
+    """Format page data for LLM processing"""
+    formatted_lines = []
+    for line in page_data['lines']:
+        formatted_lines.append(f"Line {line['global_line_number']}: {line['text']}")
+    
+    return f"=== Page {page_data['page_number']} ===\n" + "\n".join(formatted_lines)
+
+def identify_primary_sections_progressive(pages: List[Dict], client: OpenAI) -> List[Dict]:
+    """Identify primary sections page by page with progressive context"""
+    
+    section_results = []  # Will store results for each page
+    identified_sections = []  # Will store final section boundaries
+    
+    for page_idx, current_page in enumerate(pages):
+        # Get context pages
+        prev_page = pages[page_idx - 1] if page_idx > 0 else None
+        next_page = pages[page_idx + 1] if page_idx < len(pages) - 1 else None
+        
+        # Build context from previous page results
+        previous_context = ""
+        if section_results:
+            prev_sections = [f"Page {r['page_number']}: {', '.join(r['sections'])}" 
+                           for r in section_results]
+            previous_context = "Previous page classifications:\n" + "\n".join(prev_sections) + "\n\n"
+        
+        # Format current page
+        current_page_text = format_page_for_llm(current_page)
+        
+        # Format next page for context
+        next_page_context = ""
+        if next_page:
+            next_page_context = f"\nNext page context (for reference only):\n{format_page_for_llm(next_page)}"
+        
+        # Create prompt
+        prompt = f"""Analyze this earnings call transcript page and identify which primary sections are present.
+
+Primary sections (in typical order):
+1. Safe Harbor Statement - Legal disclaimers about forward-looking statements
+2. Introduction - Opening remarks, agenda, participant introductions
+3. Management Discussion - Management's prepared remarks about performance
+4. Financial Performance - Detailed financial metrics and analysis
+5. Investor Q&A - Question and answer session with analysts
+6. Closing Remarks - Final statements and call conclusion
+
+{previous_context}Current page to analyze:
+{current_page_text}
+{next_page_context}
+
+For the CURRENT PAGE ONLY, identify:
+1. Which primary sections are present on this page
+2. For each section, provide the line number range where it appears
+3. If there are section transitions, identify the exact line where they occur
+
+Return JSON format:
+{{
+    "page_number": {current_page['page_number']},
+    "sections": [
+        {{
+            "section_name": "Section Name",
+            "start_line": line_number,
+            "end_line": line_number,
+            "confidence": 0.0-1.0
+        }}
+    ]
+}}
+
+Focus only on the current page. Use the previous context and next page only as reference.
+"""
+
+        messages = [
+            {"role": "system", "content": "You are an expert at analyzing earnings call transcript structure."},
+            {"role": "user", "content": prompt}
+        ]
+        
+        try:
+            response = call_openai_with_retry(
+                client, 
+                messages, 
+                response_format={"type": "json_object"}
+            )
+            
+            result = json.loads(response)
+            page_result = {
+                'page_number': current_page['page_number'],
+                'sections': []
+            }
+            
+            for section in result.get('sections', []):
+                page_result['sections'].append(section['section_name'])
+                
+                # Add to identified sections
+                identified_sections.append({
+                    'section_name': section['section_name'],
+                    'page_number': current_page['page_number'],
+                    'start_line': section['start_line'],
+                    'end_line': section['end_line'],
+                    'confidence': section.get('confidence', 0.8)
+                })
+            
+            section_results.append(page_result)
+            logger.info(f"Page {current_page['page_number']} sections: {page_result['sections']}")
+            
+        except Exception as e:
+            logger.error(f"Error processing page {current_page['page_number']}: {str(e)}")
+            section_results.append({
+                'page_number': current_page['page_number'],
+                'sections': []
+            })
+    
+    # Consolidate overlapping sections and create final boundaries
+    consolidated_sections = consolidate_section_boundaries(identified_sections)
+    
+    return consolidated_sections
+
+def consolidate_section_boundaries(identified_sections: List[Dict]) -> List[Dict]:
+    """Consolidate overlapping section boundaries into clean boundaries"""
+    if not identified_sections:
+        return []
+    
+    # Group by section name
+    section_groups = defaultdict(list)
+    for section in identified_sections:
+        section_groups[section['section_name']].append(section)
+    
+    # For each section, find the overall start and end
+    consolidated = []
+    for section_name, occurrences in section_groups.items():
+        min_start = min(occ['start_line'] for occ in occurrences)
+        max_end = max(occ['end_line'] for occ in occurrences)
+        avg_confidence = sum(occ['confidence'] for occ in occurrences) / len(occurrences)
+        
+        consolidated.append({
+            'section_name': section_name,
+            'start_line': min_start,
+            'end_line': max_end,
+            'confidence': avg_confidence,
+            'page_span': [min(occ['page_number'] for occ in occurrences),
+                         max(occ['page_number'] for occ in occurrences)]
+        })
+    
+    # Sort by start line
+    consolidated.sort(key=lambda x: x['start_line'])
+    
+    return consolidated
+
+# ========================================
+# SECONDARY SECTION IDENTIFICATION
+# ========================================
+
+def extract_section_content_by_lines(pages: List[Dict], start_line: int, end_line: int) -> str:
+    """Extract content between global line numbers"""
+    content = []
+    
+    for page in pages:
+        for line in page['lines']:
+            if start_line <= line['global_line_number'] <= end_line:
+                content.append(line['text'])
+    
+    return ' '.join(content)
+
+def create_secondary_sections(primary_content: str, primary_type: str, client: OpenAI) -> List[Dict]:
+    """Break primary section into secondary sections"""
+    
+    prompt = f"""Break down this {primary_type} section into logical secondary sections based on distinct topics or themes.
+
+Primary section content:
+{primary_content}
+
+Guidelines for creating secondary sections:
+1. Each secondary section should represent a coherent subtopic
+2. Secondary sections should be substantial enough to stand alone (minimum 3-4 sentences)
+3. Look for natural breaks like topic changes, new speakers, or different metrics
+4. These secondary sections will become the final chunks for embedding
+
+Common secondary section patterns:
+- For "Management Discussion": Revenue Performance, Cost Management, Strategic Updates, etc.
+- For "Financial Performance": Net Interest Income, Credit Losses, Capital Ratios, etc.
+- For "Investor Q&A": Individual analyst questions and responses
+- For "Introduction": Welcome Remarks, Agenda Overview, Safe Harbor, etc.
+
+Return JSON format:
+{{
+    "secondary_sections": [
+        {{
+            "name": "Descriptive Secondary Section Name",
+            "content": "Full text content for this section",
+            "rationale": "Why this is a distinct section"
+        }}
+    ]
+}}
+
+Ensure each secondary section is substantial and represents a clear subtopic within the {primary_type}.
+"""
+
+    messages = [
+        {"role": "system", "content": "You are an expert at analyzing financial document structure and creating logical content divisions."},
+        {"role": "user", "content": prompt}
+    ]
+    
+    try:
+        response = call_openai_with_retry(
+            client, 
+            messages, 
+            response_format={"type": "json_object"}
+        )
+        
+        result = json.loads(response)
+        secondary_sections = []
+        
+        for section in result.get('secondary_sections', []):
+            secondary_sections.append({
+                'name': section['name'],
+                'content': clean_transcript_text(section['content']),
+                'rationale': section.get('rationale', '')
+            })
+        
+        return secondary_sections
+        
+    except Exception as e:
+        logger.error(f"Error creating secondary sections: {str(e)}")
+        # Fallback: return entire content as single section
+        return [{
+            'name': f"{primary_type} - Full Content",
+            'content': clean_transcript_text(primary_content),
+            'rationale': 'Failed to subdivide - using entire section'
+        }]
+
+# ========================================
+# SUMMARY AND SCORING
+# ========================================
+
+def generate_summary(content: str, section_type: str, client: OpenAI) -> str:
+    """Generate summary for a section"""
+    token_limit = TOKEN_LIMITS.get(section_type, 150)
+    
+    prompt = f"""Generate a concise summary of this {section_type}.
+
+Content:
+{content}
+
+Create a {token_limit}-token summary that:
+1. Captures key financial metrics and specific numbers
+2. Highlights main themes and messages
+3. Includes any forward-looking statements or guidance
+4. Notes significant changes or comparisons
+
+Focus on factual, specific information that would be valuable for financial analysis.
+Return only the summary text, no additional formatting.
+"""
+
+    messages = [
+        {"role": "system", "content": "You are an expert financial analyst creating concise summaries."},
+        {"role": "user", "content": prompt}
+    ]
+    
+    try:
+        response = call_openai_with_retry(client, messages)
+        return response.strip()
+    except Exception as e:
+        logger.error(f"Error generating summary: {str(e)}")
+        return f"Summary generation failed for {section_type}"
+
+def calculate_context_relevance_scores(sections: List[Dict], current_index: int, 
+                                     primary_summary: str, client: OpenAI) -> Dict:
+    """Calculate importance and context relevance scores for a section"""
+    
+    current_section = sections[current_index]
+    prev_section = sections[current_index - 1] if current_index > 0 else None
+    next_section = sections[current_index + 1] if current_index < len(sections) - 1 else None
+    
+    # Build context for scoring
+    context_text = f"Primary Section Summary: {primary_summary}\n\n"
+    context_text += f"Current Section: {current_section['secondary_section_type']}\n"
+    context_text += f"Content: {current_section['secondary_section_summary']}\n\n"
+    
+    if prev_section:
+        context_text += f"Previous Section: {prev_section['secondary_section_type']}\n"
+        context_text += f"Previous Content: {prev_section['secondary_section_summary']}\n\n"
+    
+    if next_section:
+        context_text += f"Next Section: {next_section['secondary_section_type']}\n"
+        context_text += f"Next Content: {next_section['secondary_section_summary']}\n\n"
+    
+    prompt = f"""Rate the importance and context dependencies of this transcript section.
+
+{context_text}
+
+Provide scores (0.0-1.0) for:
+
+1. importance_score: How critical is this information for investors/analysts?
+   - 0.9-1.0: Critical financial metrics, major announcements, forward guidance
+   - 0.7-0.8: Important operational updates, significant changes
+   - 0.5-0.6: Routine updates, standard disclosures
+   - 0.3-0.4: Minor details, procedural content
+   - 0.0-0.2: Minimal relevance
+
+2. preceding_context_relevance: How important is the previous section for understanding this section?
+   - 0.8-1.0: Cannot understand without previous context
+   - 0.5-0.7: Helpful context but not essential
+   - 0.0-0.4: Minimal dependency on previous section
+   - 0.0: No dependency (first section or standalone)
+
+3. following_context_relevance: How important is the next section for understanding this section?
+   - 0.8-1.0: Incomplete without following context
+   - 0.5-0.7: Enhanced by following context
+   - 0.0-0.4: Minimal dependency on following section
+   - 0.0: No dependency (last section or standalone)
+
+Consider financial materiality, strategic importance, and contextual dependencies.
+
+Return JSON format:
+{{
+    "importance_score": 0.0-1.0,
+    "preceding_context_relevance": 0.0-1.0,
+    "following_context_relevance": 0.0-1.0
+}}
+"""
+
+    messages = [
+        {"role": "system", "content": "You are an expert at evaluating financial information importance and context dependencies."},
+        {"role": "user", "content": prompt}
+    ]
+    
+    try:
+        response = call_openai_with_retry(
+            client, 
+            messages, 
+            response_format={"type": "json_object"}
+        )
+        
+        result = json.loads(response)
+        return {
+            'importance_score': float(result.get('importance_score', 0.5)),
+            'preceding_context_relevance': float(result.get('preceding_context_relevance', 0.0)) if prev_section else 0.0,
+            'following_context_relevance': float(result.get('following_context_relevance', 0.0)) if next_section else 0.0
+        }
+        
+    except Exception as e:
+        logger.error(f"Error calculating context scores: {str(e)}")
+        return {
+            'importance_score': 0.5,
+            'preceding_context_relevance': 0.0 if not prev_section else 0.3,
+            'following_context_relevance': 0.0 if not next_section else 0.3
+        }
+
+# ========================================
+# MASTER DATABASE OPERATIONS
+# ========================================
+
+def read_master_database(nas_conn: SMBConnection) -> pd.DataFrame:
+    """Read master database CSV from NAS"""
+    try:
+        csv_content = download_file_from_nas(
+            nas_conn, 
+            DEST_CONFIG['share'], 
+            DEST_CONFIG['master_db_path']
+        )
+        df = pd.read_csv(csv_content)
+        logger.info(f"Read master database with {len(df)} records")
+        return df
+    except OperationFailure:
+        # File doesn't exist, create empty dataframe
+        logger.info("Master database not found, creating new one")
+        return pd.DataFrame(columns=[
+            'filepath', 'filename', 'bank_name', 'ticker_region', 'fiscal_year', 'quarter',
+            'last_modified', 'last_processed', 'status', 'error_message',
+            'processing_time_seconds', 'section_count', 'primary_sections', 'total_tokens'
+        ])
+
+def update_master_database(nas_conn: SMBConnection, df: pd.DataFrame):
+    """Write master database CSV to NAS"""
+    try:
+        # Convert to CSV
+        csv_buffer = BytesIO()
+        df.to_csv(csv_buffer, index=False)
+        csv_content = csv_buffer.getvalue()
+        
+        # Upload to NAS
+        upload_file_to_nas(
+            nas_conn, 
+            DEST_CONFIG['share'], 
+            DEST_CONFIG['master_db_path'],
+            csv_content
+        )
+        logger.info("Updated master database on NAS")
+    except Exception as e:
+        logger.error(f"Failed to update master database: {str(e)}")
+
+def scan_for_transcripts(nas_conn: SMBConnection) -> Dict[str, Dict]:
+    """Scan NAS for transcript files"""
+    transcripts = {}
+    
+    try:
+        base_items = nas_conn.listPath(DEST_CONFIG['share'], DEST_CONFIG['base_path'])
+        
+        for year_item in base_items:
+            if year_item.filename in ['.', '..'] or not year_item.isDirectory:
+                continue
+            
+            try:
+                year = int(year_item.filename)
+                if not (VALID_YEAR_RANGE[0] <= year <= VALID_YEAR_RANGE[1]):
+                    continue
+            except ValueError:
+                continue
+            
+            year_path = f"{DEST_CONFIG['base_path']}/{year_item.filename}"
+            
+            try:
+                quarter_items = nas_conn.listPath(DEST_CONFIG['share'], year_path)
+                
+                for quarter_item in quarter_items:
+                    if quarter_item.filename in ['.', '..'] or not quarter_item.isDirectory:
+                        continue
+                    
+                    if quarter_item.filename.upper() not in VALID_QUARTERS:
+                        continue
+                    
+                    quarter_path = f"{year_path}/{quarter_item.filename}"
+                    
+                    try:
+                        files = nas_conn.listPath(DEST_CONFIG['share'], quarter_path)
+                        
+                        for file_item in files:
+                            if file_item.isDirectory:
+                                continue
+                            
+                            if any(file_item.filename.endswith(ext) for ext in FILE_EXTENSIONS):
+                                file_path = f"{quarter_path}/{file_item.filename}"
+                                
+                                transcripts[file_path] = {
+                                    'filename': file_item.filename,
+                                    'filepath': file_path,
+                                    'fiscal_year': year,
+                                    'quarter': quarter_item.filename.upper(),
+                                    'last_modified': file_item.last_write_time,
+                                    'size': file_item.file_size
+                                }
+                    
+                    except Exception as e:
+                        logger.error(f"Error scanning {quarter_path}: {str(e)}")
+            
+            except Exception as e:
+                logger.error(f"Error scanning {year_path}: {str(e)}")
+    
+    except Exception as e:
+        logger.error(f"Error scanning base path: {str(e)}")
+    
+    logger.info(f"Found {len(transcripts)} transcript files")
+    return transcripts
+
+def compare_files_with_master(current_files: Dict, master_df: pd.DataFrame) -> Dict[str, List]:
+    """Compare current files with master database"""
+    result = {
+        'new_files': [],
+        'modified_files': [],
+        'deleted_files': []
+    }
+    
+    # Get existing files from master database
+    existing_files = set(master_df['filepath'].tolist()) if len(master_df) > 0 else set()
+    current_file_paths = set(current_files.keys())
+    
+    # Find new files
+    new_file_paths = current_file_paths - existing_files
+    for filepath in new_file_paths:
+        result['new_files'].append(current_files[filepath])
+    
+    # Find modified files
+    for filepath in current_file_paths.intersection(existing_files):
+        row = master_df[master_df['filepath'] == filepath].iloc[0]
+        current_modified = current_files[filepath]['last_modified']
+        
+        if pd.notna(row['last_modified']):
+            master_modified = pd.to_datetime(row['last_modified'])
+            if current_modified > master_modified:
+                result['modified_files'].append(current_files[filepath])
+    
+    # Find deleted files
+    deleted_file_paths = existing_files - current_file_paths
+    result['deleted_files'] = list(deleted_file_paths)
+    
+    return result
+
+# ========================================
+# LOGGING FUNCTIONS
+# ========================================
+
+def log_unrecognized_bank(nas_conn: SMBConnection, bank_info: BankInfo, filepath: str):
+    """Log unrecognized bank names to NAS"""
+    try:
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        log_filename = f"unrecognized_banks_{timestamp}.log"
+        log_path = f"{DEST_CONFIG['logs_path']}/{log_filename}"
+        
+        # Ensure logs directory exists
+        ensure_directory_exists(nas_conn, DEST_CONFIG['share'], DEST_CONFIG['logs_path'])
+        
+        log_entry = f"""
+Timestamp: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+File: {filepath}
+Detected Name: {bank_info.detected_name}
+Confidence: {bank_info.confidence}
+Standardized Name: {bank_info.standardized_name}
+Ticker Region: {bank_info.ticker_region}
+---
+"""
+        
+        # Try to read existing log
+        try:
+            existing_log = download_file_from_nas(nas_conn, DEST_CONFIG['share'], log_path)
+            existing_content = existing_log.read().decode('utf-8')
+            full_content = existing_content + log_entry
+        except:
+            full_content = "Unrecognized Banks Log\n" + "=" * 50 + "\n" + log_entry
+        
+        # Write updated log
+        upload_file_to_nas(nas_conn, DEST_CONFIG['share'], log_path, full_content.encode('utf-8'))
+        logger.info(f"Logged unrecognized bank: {bank_info.detected_name}")
+        
+    except Exception as e:
+        logger.error(f"Failed to log unrecognized bank: {str(e)}")
+
+def write_error_log(nas_conn: SMBConnection, errors: List[str]):
+    """Write error log to NAS"""
+    if not errors:
+        return
+    
+    try:
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        log_filename = f"transcript_processing_errors_{timestamp}.log"
+        log_path = f"{DEST_CONFIG['logs_path']}/{log_filename}"
+        
+        # Ensure logs directory exists
+        ensure_directory_exists(nas_conn, DEST_CONFIG['share'], DEST_CONFIG['logs_path'])
+        
+        log_content = f"Transcript Processing Error Log - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+        log_content += "=" * 60 + "\n\n"
+        
+        for error in errors:
+            log_content += f"{error}\n"
+        
+        upload_file_to_nas(nas_conn, DEST_CONFIG['share'], log_path, log_content.encode('utf-8'))
+        logger.info(f"Error log written to: {log_path}")
+        
+    except Exception as e:
+        logger.error(f"Failed to write error log: {str(e)}")
+
+# ========================================
+# MAIN PROCESSING FUNCTION
+# ========================================
+
+def process_transcript(nas_conn: SMBConnection, file_info: Dict, client: OpenAI) -> ProcessingStatus:
+    """Process a single transcript file"""
+    start_time = time.time()
+    status = ProcessingStatus(
+        filepath=file_info['filepath'],
+        status='processing'
+    )
+    
+    try:
+        logger.info(f"Processing: {file_info['filename']}")
+        
+        # Download PDF
+        pdf_content = download_file_from_nas(
+            nas_conn,
+            DEST_CONFIG['share'],
+            file_info['filepath']
+        )
+        
+        # Extract text with indexed lines
+        pages = extract_pdf_text_indexed(pdf_content)
+        
+        # Extract first 1000 words for bank identification
+        first_words = extract_first_n_words(pages, 1000)
+        
+        # Identify bank name
+        bank_info = identify_bank_with_retry(first_words, client)
+        
+        # Log unrecognized banks
+        if not bank_info.recognized:
+            log_unrecognized_bank(nas_conn, bank_info, file_info['filepath'])
+        
+        # Identify primary sections
+        primary_boundaries = identify_primary_sections_progressive(pages, client)
+        
+        if not primary_boundaries:
+            raise Exception("No primary sections identified")
+        
+        # Process each primary section
+        all_sections = []
+        section_order = 0
+        primary_section_names = []
+        
+        for i, boundary in enumerate(primary_boundaries):
+            # Extract primary section content
+            next_boundary = primary_boundaries[i + 1] if i < len(primary_boundaries) - 1 else None
+            
+            start_line = boundary['start_line']
+            end_line = next_boundary['start_line'] - 1 if next_boundary else max(
+                line['global_line_number'] for page in pages for line in page['lines']
+            )
+            
+            primary_content = extract_section_content_by_lines(pages, start_line, end_line)
+            
+            # Generate primary section summary
+            primary_summary = generate_summary(
+                primary_content, 
+                'primary_summary', 
+                client
+            )
+            
+            primary_section_names.append(boundary['section_name'])
+            
+            # Create secondary sections
+            secondary_sections = create_secondary_sections(
+                primary_content,
+                boundary['section_name'],
+                client
+            )
+            
+            # Store sections for scoring
+            temp_sections = []
+            
+            # Process each secondary section
+            for sec in secondary_sections:
+                section_order += 1
+                
+                # Generate secondary summary
+                secondary_summary = generate_summary(
+                    sec['content'],
+                    'secondary_summary',
+                    client
+                )
+                
+                # Create section object
+                section = TranscriptSection(
+                    fiscal_year=file_info['fiscal_year'],
+                    quarter=file_info['quarter'],
+                    bank_name=bank_info.standardized_name,
+                    ticker_region=bank_info.ticker_region,
+                    filepath=file_info['filepath'],
+                    filename=file_info['filename'],
+                    date_last_modified=file_info['last_modified'],
+                    primary_section_type=boundary['section_name'],
+                    primary_section_summary=primary_summary,
+                    secondary_section_type=sec['name'],
+                    secondary_section_summary=secondary_summary,
+                    section_content=sec['content'],
+                    section_order=section_order,
+                    section_tokens=count_tokens(sec['content'])
+                )
+                
+                temp_sections.append(section)
+            
+            # Calculate context relevance scores for sections in this primary
+            sections_dict = [asdict(s) for s in temp_sections]
+            
+            for idx, section in enumerate(temp_sections):
+                scores = calculate_context_relevance_scores(
+                    sections_dict, 
+                    idx, 
+                    primary_summary, 
+                    client
+                )
+                
+                section.importance_score = scores['importance_score']
+                section.preceding_context_relevance = scores['preceding_context_relevance']
+                section.following_context_relevance = scores['following_context_relevance']
+                
+                # Generate embedding
+                section.section_embedding = generate_embedding(client, section.section_content)
+                
+                all_sections.append(section)
+        
+        # Calculate totals
+        total_tokens = sum(s.section_tokens for s in all_sections)
+        
+        status.status = 'processed'
+        status.last_processed = datetime.now()
+        status.processing_time = time.time() - start_time
+        status.section_count = len(all_sections)
+        status.primary_sections = primary_section_names
+        status.total_tokens = total_tokens
+        
+        logger.info(f"Successfully processed {file_info['filename']} with {len(all_sections)} sections")
+        
+        # Note: In this version, we don't store sections in database
+        # The sections are processed and could be stored in a separate JSON file
+        # or handled by another process that reads the master database
+        
+    except Exception as e:
+        logger.error(f"Error processing {file_info['filename']}: {str(e)}")
+        status.status = 'error'
+        status.error_message = str(e)
+        status.processing_time = time.time() - start_time
+    
+    return status
+
+# ========================================
+# MAIN EXECUTION
+# ========================================
+
+def main():
+    """Main execution function"""
+    logger.info("Starting Bank Transcript Processor - Stage 2 (Updated)")
+    logger.info("=" * 60)
+    
+    errors = []
+    stats = {
+        'new_files': 0,
+        'modified_files': 0,
+        'deleted_files': 0,
+        'processed_files': 0,
+        'failed_files': 0,
+        'total_sections': 0
+    }
+    
+    nas_conn = None
+    
+    try:
+        # Initialize OpenAI client
+        openai_client = get_openai_client()
+        
+        # Connect to NAS
+        logger.info(f"Connecting to NAS ({DEST_NAS_IP})...")
+        nas_conn = create_smb_connection(DEST_NAS_IP, NAS_USERNAME, NAS_PASSWORD, DEST_NAS_PORT)
+        
+        # Read master database
+        master_df = read_master_database(nas_conn)
+        
+        # Scan for transcript files
+        current_files = scan_for_transcripts(nas_conn)
+        
+        # Compare with master database
+        file_comparison = compare_files_with_master(current_files, master_df)
+        
+        # Update stats
+        stats['new_files'] = len(file_comparison['new_files'])
+        stats['modified_files'] = len(file_comparison['modified_files'])
+        stats['deleted_files'] = len(file_comparison['deleted_files'])
+        
+        logger.info(f"File comparison results:")
+        logger.info(f"  - New files: {stats['new_files']}")
+        logger.info(f"  - Modified files: {stats['modified_files']}")
+        logger.info(f"  - Deleted files: {stats['deleted_files']}")
+        
+        # Remove deleted files from master database
+        if file_comparison['deleted_files']:
+            logger.info(f"Removing {len(file_comparison['deleted_files'])} deleted files from master database")
+            master_df = master_df[~master_df['filepath'].isin(file_comparison['deleted_files'])]
+        
+        # Process new and modified files
+        files_to_process = file_comparison['new_files'] + file_comparison['modified_files']
+        
+        if files_to_process:
+            logger.info(f"\nProcessing {len(files_to_process)} files (batch size: {BATCH_SIZE})...")
+            
+            # Remove existing records for modified files
+            if file_comparison['modified_files']:
+                modified_paths = [f['filepath'] for f in file_comparison['modified_files']]
+                master_df = master_df[~master_df['filepath'].isin(modified_paths)]
+            
+            # Process files in batches
+            for i in range(0, len(files_to_process), BATCH_SIZE):
+                batch = files_to_process[i:i + BATCH_SIZE]
+                logger.info(f"\nProcessing batch {i//BATCH_SIZE + 1} of {(len(files_to_process) + BATCH_SIZE - 1)//BATCH_SIZE}")
+                
+                for file_info in batch:
+                    # Process file
+                    status = process_transcript(nas_conn, file_info, openai_client)
+                    
+                    # Add to master database
+                    new_row = {
+                        'filepath': status.filepath,
+                        'filename': file_info['filename'],
+                        'bank_name': 'Unknown',  # Will be updated if processing succeeds
+                        'ticker_region': 'Unknown',
+                        'fiscal_year': file_info['fiscal_year'],
+                        'quarter': file_info['quarter'],
+                        'last_modified': file_info['last_modified'],
+                        'last_processed': status.last_processed,
+                        'status': status.status,
+                        'error_message': status.error_message,
+                        'processing_time_seconds': status.processing_time,
+                        'section_count': status.section_count,
+                        'primary_sections': json.dumps(status.primary_sections) if status.primary_sections else None,
+                        'total_tokens': status.total_tokens
+                    }
+                    
+                    master_df = pd.concat([master_df, pd.DataFrame([new_row])], ignore_index=True)
+                    
+                    # Update stats
+                    if status.status == 'processed':
+                        stats['processed_files'] += 1
+                        stats['total_sections'] += status.section_count or 0
+                    else:
+                        stats['failed_files'] += 1
+                        errors.append(f"{status.filepath}: {status.error_message}")
+                    
+                    # Save master database after each file
+                    update_master_database(nas_conn, master_df)
+        
+        else:
+            logger.info("\nNo files to process - all transcripts are up to date")
+        
+        # Write error log if needed
+        if errors:
+            write_error_log(nas_conn, errors)
+        
+        # Summary
+        logger.info("\n" + "=" * 60)
+        logger.info("PROCESSING COMPLETE - Summary:")
+        logger.info(f"  - New files processed: {stats['new_files'] - stats['failed_files']}")
+        logger.info(f"  - Modified files processed: {stats['modified_files']}")
+        logger.info(f"  - Deleted files removed: {stats['deleted_files']}")
+        logger.info(f"  - Failed files: {stats['failed_files']}")
+        logger.info(f"  - Total processed successfully: {stats['processed_files']}")
+        logger.info(f"  - Total sections created: {stats['total_sections']}")
+        
+    except Exception as e:
+        logger.error(f"Critical error: {str(e)}")
+        errors.append(f"Critical error: {str(e)}")
+        
+    finally:
+        # Clean up connections
+        if nas_conn:
+            nas_conn.close()
+        
+        logger.info("\nScript execution completed")
+
+if __name__ == "__main__":
+    main()

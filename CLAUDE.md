@@ -4,97 +4,92 @@
 Two-stage system for creating comprehensive databases from Canadian and US bank earnings call transcripts:
 
 1. **Stage 1**: File aggregation and organization ✅ COMPLETED
-2. **Stage 2**: LLM processing and database creation 🔄 NEXT
+2. **Stage 2**: Database processing and retrieval system 🔄 IN PROGRESS
 
 ## Stage 1: File Aggregation (COMPLETED)
 
 ### Location
-`stage1-file-aggregation/` directory contains:
-- `transcript_aggregator.py` - Main aggregation script
-- `README.md` - Detailed stage 1 documentation
-
-### Key Features
-- **NAS Monitoring**: Automated file discovery and copying
-- **Flexible Patterns**: Handles Q1, Q121, Q1 2020, Q1 2022 naming variations
-- **Smart Deduplication**: Only copies new/modified files using timestamps
-- **Error Resilience**: Continues processing on individual failures
-- **NTLM v2 Support**: Direct TCP connection for reliable NAS access
-
-### Configuration Status
-- ✅ Flexible quarter pattern matching (Q1, Q121, Q1 2020, etc.)
-- ✅ Enhanced transcript folder matching (clean final transcripts, etc.)
-- ✅ Year range: 2020-2031
-- ✅ NTLM v2 and direct TCP configured
-- ⚠️ **TODO**: Update NAS IPs and credentials for production
+`stage1-file-aggregation/` directory contains complete implementation
 
 ### Data Flow
 ```
-Source NAS (wrkgrp30):
-├── Canadian Peer Benchmarking/
-│   └── YYYY/Qxxx/[Final Transcripts]/
-└── US Peer Benchmarking/
-    └── YYYY/Qxxx/[Clean Transcripts]/
-
-→ Aggregated Destination (wrkgrp33):
-    database_refresh/YYYY/QX/transcript.pdf
+Source NAS → database_refresh/YYYY/QX/transcript.pdf
 ```
 
-## Stage 2: LLM Processing (UPCOMING)
+## Stage 2: Database Processing (IN PROGRESS)
 
-### Planned Components
-1. **PDF Processing**: Text extraction and cleaning
-2. **RAG Database**: Vector embeddings for semantic search
-3. **Structured Database**: Financial metrics extraction and tagging
-4. **API Layer**: Chatbot integration endpoints
+### Overview
+Transforms PDF transcripts into a searchable PostgreSQL database with:
+- Hierarchical section classification (primary/secondary)
+- Vector embeddings for similarity search
+- Three-path retrieval system optimized for different query types
 
-### Technical Stack (To Be Determined)
-- PDF processing library (PyPDF2, pdfplumber, etc.)
-- LLM integration (OpenAI, local models, etc.)
-- Vector database (Chroma, Pinecone, etc.)
-- Traditional database (PostgreSQL, SQLite, etc.)
-
-## Dependencies
-- **Stage 1**: `pysmb` for NAS connectivity
-- **Stage 2**: TBD based on chosen LLM and database technologies
-
-## Commands
-
-### Stage 1
-```bash
-# Install dependencies
-pip install pysmb
-
-# Run aggregation
-cd stage1-file-aggregation
-python transcript_aggregator.py
-
-# Schedule with cron
-0 */4 * * * /usr/bin/python3 /path/to/transcript_aggregator.py
+### Database Schema
+```sql
+transcript_sections:
+├── File metadata (year, quarter, bank, ticker, filepath)
+├── Hierarchical classification (primary/secondary types + summaries)
+├── Content data (text, order, tokens, embeddings)
+└── Scoring (importance, context relevance)
 ```
 
-### Stage 2 (Future)
-```bash
-# TBD - Will be defined in next development phase
+### Processing Pipeline
+1. **Primary Section Identification**: LLM identifies 6 main sections
+2. **Secondary Section Breakdown**: LLM creates contextual subsections (these ARE the chunks)
+3. **Enhancement**: Generate summaries, embeddings, and relevance scores
+
+### Retrieval System
+
+#### Query Router
+Analyzes queries to select optimal path:
+- **Similarity Search**: For specific topics/metrics
+- **Section Retrieval**: For section-specific queries  
+- **Full Transcript**: For comprehensive analysis
+
+#### Path 1: Similarity Search (Updated Flow)
+1. Vector search → Top 20 similar sections
+2. LLM relevance filtering → Remove irrelevant
+3. Importance reranking → Keep top 10
+4. Context enhancement → Add important neighbors
+5. Section ordering → Restore transcript order
+6. Gap filling → Fill small gaps under token budget
+7. Synthesis → Generate answer
+
+#### Path 2: Section Retrieval
+1. Get primary summaries
+2. LLM selects relevant sections
+3. Retrieve complete sections
+4. Synthesis
+
+#### Path 3: Full Transcript
+1. Retrieve everything
+2. Synthesis
+
+### Key Design Decisions
+- No separate chunking - secondary sections are the chunks
+- Early LLM filtering before expensive reranking
+- Smart context inclusion based on relevance scores
+- Gap filling maintains narrative continuity
+
+### Implementation Files
+- `stage2-database-processing/final_schema.sql` - PostgreSQL schema
+- `stage2-database-processing/retrieval_flow_detailed.md` - Complete retrieval documentation
+- `stage2-database-processing/README.md` - Stage 2 overview
+
+### Next Steps
+1. Implement PDF text extraction
+2. Build LLM section identification
+3. Create embedding generation
+4. Develop retrieval API
+5. Build synthesis layer
+
+## Project Structure
 ```
-
-## Project Files
-- `PROJECT_STATUS.md` - Current status and next steps
-- `stage1-file-aggregation/` - Complete Stage 1 implementation
-- `CLAUDE.md` - This context file for future sessions
-
-## Development Notes
-
-### Stage 1 Lessons Learned
-- BytesIO required for pysmb file operations
-- Flexible pattern matching essential for inconsistent naming
-- Destination path parsing needs careful relative path handling
-- NTLM v2 and direct TCP crucial for stable connections
-
-### Stage 2 Preparation
-- Stage 1 provides organized PDF files ready for processing
-- Need to select LLM models suitable for financial text analysis
-- Consider chunking strategy for long transcript documents
-- Plan metadata schema for financial content tagging
-
-## Session Handoff
-Stage 1 is complete and production-ready after credential configuration. Next session should focus on Stage 2 planning: technology selection, architecture design, and initial implementation of PDF processing and LLM integration.
+transcripts/
+├── stage1-file-aggregation/     # Complete file aggregation
+├── stage2-database-processing/  # Database and retrieval system
+│   ├── final_schema.sql
+│   ├── retrieval_flow_detailed.md
+│   └── README.md
+└── CLAUDE.md                   # This file
+```
