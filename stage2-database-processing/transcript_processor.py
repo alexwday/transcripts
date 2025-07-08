@@ -2,6 +2,29 @@
 """
 Bank Earnings Call Transcript Processor - Stage 2 (Updated)
 Processes PDF transcripts from NAS into CSV master database with embeddings
+
+DEBUG MODE USAGE:
+To enable debug mode for testing with detailed logging and intermediate file saving:
+
+1. Set DEBUG_MODE = True in the configuration section
+2. Optionally set DEBUG_TARGET_FILE to target a specific file (e.g., "2024/Q1/TD_Bank_Q1_2024.pdf")
+3. Configure other debug options:
+   - DEBUG_SAVE_INTERMEDIATES: Save all intermediate outputs to /tmp/transcript_debug/
+   - DEBUG_SKIP_EMBEDDINGS: Skip embedding generation for faster testing
+   - DEBUG_MAX_PAGES: Limit number of pages processed (None = all pages)
+
+Debug mode will:
+- Process only one file (target file or first available)
+- Save detailed logs and intermediate outputs
+- Provide step-by-step processing details
+- Enable DEBUG-level logging
+
+Example debug files saved:
+- 01_extracted_pages.json - PDF extraction results
+- 02_first_1000_words.txt - Bank identification input
+- 03_page_XX_prompt.txt - Primary section identification prompts
+- 03_page_XX_response.json - Primary section identification responses
+- And many more intermediate files for analysis
 """
 
 import os
@@ -96,6 +119,19 @@ VALID_YEAR_RANGE = (2020, 2031)
 VALID_QUARTERS = ["Q1", "Q2", "Q3", "Q4"]
 FILE_EXTENSIONS = [".pdf", ".PDF"]
 
+# Debug Configuration
+DEBUG_MODE = False  # Set to True for detailed single-file testing
+DEBUG_TARGET_FILE = None  # Specific file to debug, e.g. "2024/Q1/TD_Bank_Q1_2024.pdf"
+DEBUG_SAVE_INTERMEDIATES = True  # Save intermediate outputs to files
+DEBUG_SKIP_EMBEDDINGS = False  # Skip embedding generation in debug mode
+DEBUG_MAX_PAGES = None  # Limit pages processed in debug mode (None = all pages)
+
+# QUICK DEBUG ACTIVATION - Uncomment these lines to enable debug mode:
+# DEBUG_MODE = True
+# DEBUG_TARGET_FILE = "2024/Q1/TD_Bank_Q1_2024.pdf"  # Optional: target specific file
+# DEBUG_SKIP_EMBEDDINGS = True  # Optional: skip embeddings for faster testing
+# DEBUG_MAX_PAGES = 5  # Optional: limit to first 5 pages
+
 # Token limits for different section types
 TOKEN_LIMITS = {
     "primary_summary": 200,
@@ -145,12 +181,84 @@ BANK_MAPPINGS = {
 # LOGGING SETUP
 # ========================================
 
+# Set logging level based on debug mode
+log_level = logging.DEBUG if DEBUG_MODE else logging.INFO
 logging.basicConfig(
-    level=logging.INFO,
+    level=log_level,
     format='%(asctime)s - %(levelname)s - %(message)s',
     datefmt='%Y-%m-%d %H:%M:%S'
 )
 logger = logging.getLogger(__name__)
+
+# Debug output directory
+DEBUG_OUTPUT_DIR = "/tmp/transcript_debug" if DEBUG_MODE else None
+if DEBUG_MODE and DEBUG_SAVE_INTERMEDIATES:
+    os.makedirs(DEBUG_OUTPUT_DIR, exist_ok=True)
+    logger.info(f"Debug mode enabled. Intermediate files will be saved to: {DEBUG_OUTPUT_DIR}")
+
+# ========================================
+# DEBUG HELPER FUNCTIONS
+# ========================================
+
+def debug_save_to_file(content: str, filename: str, description: str = ""):
+    """Save content to debug file if in debug mode"""
+    if not DEBUG_MODE or not DEBUG_SAVE_INTERMEDIATES:
+        return
+    
+    try:
+        filepath = os.path.join(DEBUG_OUTPUT_DIR, filename)
+        with open(filepath, 'w', encoding='utf-8') as f:
+            f.write(content)
+        logger.debug(f"DEBUG: Saved {description} to {filepath}")
+    except Exception as e:
+        logger.warning(f"DEBUG: Failed to save {filename}: {str(e)}")
+
+def debug_save_json(data: Any, filename: str, description: str = ""):
+    """Save JSON data to debug file if in debug mode"""
+    if not DEBUG_MODE or not DEBUG_SAVE_INTERMEDIATES:
+        return
+    
+    try:
+        filepath = os.path.join(DEBUG_OUTPUT_DIR, filename)
+        with open(filepath, 'w', encoding='utf-8') as f:
+            json.dump(data, f, indent=2, default=str)
+        logger.debug(f"DEBUG: Saved {description} to {filepath}")
+    except Exception as e:
+        logger.warning(f"DEBUG: Failed to save {filename}: {str(e)}")
+
+def debug_log_step(step_name: str, details: str = ""):
+    """Log debug step with detailed information"""
+    if DEBUG_MODE:
+        separator = "=" * 60
+        logger.debug(f"\n{separator}")
+        logger.debug(f"DEBUG STEP: {step_name}")
+        if details:
+            logger.debug(f"DETAILS: {details}")
+        logger.debug(f"{separator}")
+
+def debug_log_llm_call(prompt_type: str, prompt: str, response: str = None):
+    """Log LLM call details in debug mode"""
+    if not DEBUG_MODE:
+        return
+    
+    timestamp = datetime.now().strftime("%H%M%S")
+    
+    # Save prompt
+    debug_save_to_file(
+        prompt, 
+        f"{timestamp}_{prompt_type}_prompt.txt",
+        f"{prompt_type} prompt"
+    )
+    
+    # Save response if provided
+    if response:
+        debug_save_to_file(
+            response,
+            f"{timestamp}_{prompt_type}_response.txt", 
+            f"{prompt_type} response"
+        )
+    
+    logger.debug(f"DEBUG LLM: {prompt_type} call - prompt length: {len(prompt)} chars")
 
 # ========================================
 # DATA CLASSES
@@ -309,13 +417,23 @@ def get_openai_client() -> OpenAI:
 
 def extract_pdf_text_indexed(pdf_content: BytesIO) -> List[Dict[str, Any]]:
     """Extract text from PDF with indexed lines and page numbers"""
+    debug_log_step("PDF Text Extraction", "Starting PDF text extraction with line indexing")
+    
     pages = []
     
     try:
         reader = PdfReader(pdf_content)
+        total_pages = len(reader.pages)
         global_line_number = 0
         
-        for page_num, page in enumerate(reader.pages):
+        # Apply debug page limit if set
+        max_pages = DEBUG_MAX_PAGES if DEBUG_MODE and DEBUG_MAX_PAGES else total_pages
+        pages_to_process = min(max_pages, total_pages)
+        
+        if DEBUG_MODE:
+            logger.debug(f"DEBUG: Processing {pages_to_process} of {total_pages} pages")
+        
+        for page_num, page in enumerate(reader.pages[:pages_to_process]):
             text = page.extract_text()
             
             # Split into lines and create indexed structure
@@ -338,6 +456,21 @@ def extract_pdf_text_indexed(pdf_content: BytesIO) -> List[Dict[str, Any]]:
             
             pages.append(page_data)
             
+            if DEBUG_MODE:
+                logger.debug(f"DEBUG: Page {page_num + 1} - {len(page_data['lines'])} lines extracted")
+        
+        # Save extracted pages in debug mode
+        if DEBUG_MODE:
+            debug_save_json(pages, "01_extracted_pages.json", "extracted PDF pages with line indexing")
+            
+            # Save a formatted text version for easy reading
+            formatted_text = ""
+            for page in pages:
+                formatted_text += f"\n=== PAGE {page['page_number']} ===\n"
+                for line in page['lines']:
+                    formatted_text += f"Line {line['global_line_number']}: {line['text']}\n"
+            debug_save_to_file(formatted_text, "01_extracted_text_formatted.txt", "formatted extracted text")
+        
         logger.info(f"Extracted indexed text from {len(pages)} pages, {global_line_number} lines total")
         return pages
         
@@ -453,13 +586,26 @@ def call_openai_with_retry(client: OpenAI, messages: List[Dict],
 
 def generate_embedding(client: OpenAI, text: str) -> List[float]:
     """Generate embedding for text"""
+    if DEBUG_MODE and DEBUG_SKIP_EMBEDDINGS:
+        logger.debug("DEBUG: Skipping embedding generation (DEBUG_SKIP_EMBEDDINGS=True)")
+        return [0.0] * EMBEDDING_DIMENSIONS  # Return dummy embedding
+    
     try:
+        if DEBUG_MODE:
+            logger.debug(f"DEBUG: Generating embedding for text of length {len(text)}")
+        
         response = client.embeddings.create(
             model=EMBEDDING_MODEL,
             input=text,
             dimensions=EMBEDDING_DIMENSIONS
         )
-        return response.data[0].embedding
+        
+        embedding = response.data[0].embedding
+        
+        if DEBUG_MODE:
+            logger.debug(f"DEBUG: Generated embedding with {len(embedding)} dimensions")
+        
+        return embedding
     except Exception as e:
         logger.error(f"Error generating embedding: {str(e)}")
         raise
@@ -470,6 +616,11 @@ def generate_embedding(client: OpenAI, text: str) -> List[float]:
 
 def identify_bank_name(first_words: str, client: OpenAI) -> BankInfo:
     """Identify bank name from first 1000 words using LLM tool call"""
+    debug_log_step("Bank Identification", f"Identifying bank from {len(first_words)} characters")
+    
+    # Save first words in debug mode
+    if DEBUG_MODE:
+        debug_save_to_file(first_words, "02_first_1000_words.txt", "first 1000 words for bank identification")
     
     # Create tool definition
     bank_identification_tool = {
@@ -521,21 +672,32 @@ Use the tool to return the detected bank name and your confidence level.
     ]
     
     try:
+        # Log the LLM call
+        debug_log_llm_call("bank_identification", prompt)
+        
         response = call_openai_with_retry(
             client, 
             messages, 
             tools=[bank_identification_tool]
         )
         
+        # Log the response
+        debug_log_llm_call("bank_identification", prompt, response)
+        
         result = json.loads(response)
         detected_name = result.get("detected_bank_name", "").strip()
         confidence = float(result.get("confidence", 0.0))
+        
+        if DEBUG_MODE:
+            logger.debug(f"DEBUG: Bank identification result - Name: '{detected_name}', Confidence: {confidence}")
         
         # Check if detected name matches our mappings
         standardized_info = None
         for mapped_name, info in BANK_MAPPINGS.items():
             if mapped_name.lower() in detected_name.lower() or detected_name.lower() in mapped_name.lower():
                 standardized_info = info
+                if DEBUG_MODE:
+                    logger.debug(f"DEBUG: Matched '{detected_name}' to '{mapped_name}' -> {info}")
                 break
         
         if standardized_info:
@@ -591,6 +753,7 @@ def format_page_for_llm(page_data: Dict) -> str:
 
 def identify_primary_sections_progressive(pages: List[Dict], client: OpenAI) -> List[Dict]:
     """Identify primary sections page by page with progressive context"""
+    debug_log_step("Primary Section Identification", f"Processing {len(pages)} pages with progressive context")
     
     section_results = []  # Will store results for each page
     identified_sections = []  # Will store final section boundaries
@@ -657,11 +820,28 @@ Focus only on the current page. Use the previous context and next page only as r
         ]
         
         try:
+            if DEBUG_MODE:
+                logger.debug(f"DEBUG: Processing page {current_page['page_number']} with {len(current_page['lines'])} lines")
+                # Save the prompt for this page
+                debug_save_to_file(
+                    prompt, 
+                    f"03_page_{current_page['page_number']:02d}_prompt.txt",
+                    f"primary section identification prompt for page {current_page['page_number']}"
+                )
+            
             response = call_openai_with_retry(
                 client, 
                 messages, 
                 response_format={"type": "json_object"}
             )
+            
+            if DEBUG_MODE:
+                # Save the response for this page
+                debug_save_to_file(
+                    response,
+                    f"03_page_{current_page['page_number']:02d}_response.json",
+                    f"primary section identification response for page {current_page['page_number']}"
+                )
             
             result = json.loads(response)
             page_result = {
@@ -680,6 +860,9 @@ Focus only on the current page. Use the previous context and next page only as r
                     'end_line': section['end_line'],
                     'confidence': section.get('confidence', 0.8)
                 })
+                
+                if DEBUG_MODE:
+                    logger.debug(f"DEBUG: Found section '{section['section_name']}' on page {current_page['page_number']} (lines {section['start_line']}-{section['end_line']})")
             
             section_results.append(page_result)
             logger.info(f"Page {current_page['page_number']} sections: {page_result['sections']}")
@@ -693,6 +876,16 @@ Focus only on the current page. Use the previous context and next page only as r
     
     # Consolidate overlapping sections and create final boundaries
     consolidated_sections = consolidate_section_boundaries(identified_sections)
+    
+    # Save debug output
+    if DEBUG_MODE:
+        debug_save_json(section_results, "03_page_results.json", "page-by-page section identification results")
+        debug_save_json(identified_sections, "03_identified_sections.json", "all identified section boundaries")
+        debug_save_json(consolidated_sections, "03_consolidated_sections.json", "final consolidated section boundaries")
+        
+        logger.debug(f"DEBUG: Section identification complete - {len(consolidated_sections)} primary sections identified")
+        for section in consolidated_sections:
+            logger.debug(f"DEBUG: - {section['section_name']}: lines {section['start_line']}-{section['end_line']}")
     
     return consolidated_sections
 
@@ -744,6 +937,10 @@ def extract_section_content_by_lines(pages: List[Dict], start_line: int, end_lin
 
 def create_secondary_sections(primary_content: str, primary_type: str, client: OpenAI) -> List[Dict]:
     """Break primary section into secondary sections"""
+    debug_log_step("Secondary Section Creation", f"Breaking down {primary_type} section into secondary sections")
+    
+    if DEBUG_MODE:
+        logger.debug(f"DEBUG: Processing {primary_type} section with {len(primary_content)} characters")
     
     prompt = f"""Break down this {primary_type} section into logical secondary sections based on distinct topics or themes.
 
@@ -782,11 +979,19 @@ Ensure each secondary section is substantial and represents a clear subtopic wit
     ]
     
     try:
+        # Save debug information
+        if DEBUG_MODE:
+            debug_save_to_file(primary_content, f"04_{primary_type.replace(' ', '_').lower()}_content.txt", f"{primary_type} section content")
+            debug_save_to_file(prompt, f"04_{primary_type.replace(' ', '_').lower()}_prompt.txt", f"{primary_type} secondary section prompt")
+        
         response = call_openai_with_retry(
             client, 
             messages, 
             response_format={"type": "json_object"}
         )
+        
+        if DEBUG_MODE:
+            debug_save_to_file(response, f"04_{primary_type.replace(' ', '_').lower()}_response.json", f"{primary_type} secondary section response")
         
         result = json.loads(response)
         secondary_sections = []
@@ -797,6 +1002,11 @@ Ensure each secondary section is substantial and represents a clear subtopic wit
                 'content': clean_transcript_text(section['content']),
                 'rationale': section.get('rationale', '')
             })
+        
+        if DEBUG_MODE:
+            logger.debug(f"DEBUG: Created {len(secondary_sections)} secondary sections for {primary_type}")
+            for i, sec in enumerate(secondary_sections):
+                logger.debug(f"DEBUG: - {i+1}. {sec['name']} ({len(sec['content'])} chars)")
         
         return secondary_sections
         
@@ -1269,6 +1479,43 @@ def process_transcript(nas_conn: SMBConnection, file_info: Dict, client: OpenAI)
         
         logger.info(f"Successfully processed {file_info['filename']} with {len(all_sections)} sections")
         
+        # Save final debug output
+        if DEBUG_MODE:
+            debug_save_json([asdict(s) for s in all_sections], "05_final_sections.json", "final processed sections")
+            
+            # Create a readable summary
+            summary = f"""PROCESSING SUMMARY FOR {file_info['filename']}
+{'='*60}
+
+Bank Information:
+- Detected Name: {bank_info.detected_name}
+- Standardized Name: {bank_info.standardized_name}
+- Ticker Region: {bank_info.ticker_region}
+- Recognition Confidence: {bank_info.confidence}
+
+Primary Sections Found: {len(primary_section_names)}
+{chr(10).join(f"- {name}" for name in primary_section_names)}
+
+Secondary Sections Created: {len(all_sections)}
+Total Tokens: {total_tokens}
+Processing Time: {status.processing_time:.2f} seconds
+
+Section Details:
+"""
+            for i, section in enumerate(all_sections, 1):
+                summary += f"""
+{i}. {section.secondary_section_type}
+   Primary: {section.primary_section_type}
+   Tokens: {section.section_tokens}
+   Importance: {section.importance_score:.2f}
+   Preceding Context: {section.preceding_context_relevance:.2f}
+   Following Context: {section.following_context_relevance:.2f}
+   Content Preview: {section.section_content[:100]}...
+"""
+            
+            debug_save_to_file(summary, "05_processing_summary.txt", "complete processing summary")
+            logger.debug(f"DEBUG: Processing complete - {len(all_sections)} sections created, check {DEBUG_OUTPUT_DIR} for detailed outputs")
+        
         # Note: In this version, we don't store sections in database
         # The sections are processed and could be stored in a separate JSON file
         # or handled by another process that reads the master database
@@ -1287,8 +1534,18 @@ def process_transcript(nas_conn: SMBConnection, file_info: Dict, client: OpenAI)
 
 def main():
     """Main execution function"""
-    logger.info("Starting Bank Transcript Processor - Stage 2 (Updated)")
+    mode = "DEBUG" if DEBUG_MODE else "PRODUCTION"
+    logger.info(f"Starting Bank Transcript Processor - Stage 2 ({mode} Mode)")
     logger.info("=" * 60)
+    
+    if DEBUG_MODE:
+        logger.info(f"DEBUG MODE ENABLED:")
+        logger.info(f"  - Target file: {DEBUG_TARGET_FILE or 'First available file'}")
+        logger.info(f"  - Save intermediates: {DEBUG_SAVE_INTERMEDIATES}")
+        logger.info(f"  - Skip embeddings: {DEBUG_SKIP_EMBEDDINGS}")
+        logger.info(f"  - Max pages: {DEBUG_MAX_PAGES or 'All pages'}")
+        logger.info(f"  - Output directory: {DEBUG_OUTPUT_DIR}")
+        logger.info("=" * 60)
     
     errors = []
     stats = {
@@ -1336,6 +1593,27 @@ def main():
         
         # Process new and modified files
         files_to_process = file_comparison['new_files'] + file_comparison['modified_files']
+        
+        # In debug mode, filter to target file or take first file
+        if DEBUG_MODE and files_to_process:
+            if DEBUG_TARGET_FILE:
+                # Look for specific target file
+                target_files = [f for f in files_to_process if DEBUG_TARGET_FILE in f['filepath']]
+                if target_files:
+                    files_to_process = [target_files[0]]
+                    logger.info(f"DEBUG: Found target file: {files_to_process[0]['filepath']}")
+                else:
+                    logger.warning(f"DEBUG: Target file '{DEBUG_TARGET_FILE}' not found in files to process")
+                    if files_to_process:
+                        files_to_process = [files_to_process[0]]
+                        logger.info(f"DEBUG: Using first available file: {files_to_process[0]['filepath']}")
+                    else:
+                        logger.error("DEBUG: No files available for processing")
+                        return
+            else:
+                # Take first file
+                files_to_process = [files_to_process[0]]
+                logger.info(f"DEBUG: Using first available file: {files_to_process[0]['filepath']}")
         
         if files_to_process:
             logger.info(f"\nProcessing {len(files_to_process)} files (batch size: {BATCH_SIZE})...")
