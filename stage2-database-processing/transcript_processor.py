@@ -122,7 +122,7 @@ FILE_EXTENSIONS = [".pdf", ".PDF"]
 # Debug Configuration
 DEBUG_MODE = False  # Set to True for detailed single-file testing
 DEBUG_TARGET_FILE = None  # Specific file to debug, e.g. "2024/Q1/TD_Bank_Q1_2024.pdf"
-DEBUG_SAVE_INTERMEDIATES = True  # Save intermediate outputs to files
+DEBUG_SAVE_INTERMEDIATES = False  # Save intermediate outputs to files (can be verbose)
 DEBUG_SKIP_EMBEDDINGS = False  # Skip embedding generation in debug mode
 DEBUG_MAX_PAGES = None  # Limit pages processed in debug mode (None = all pages)
 
@@ -131,6 +131,7 @@ DEBUG_MAX_PAGES = None  # Limit pages processed in debug mode (None = all pages)
 # DEBUG_TARGET_FILE = "2024/Q1/TD_Bank_Q1_2024.pdf"  # Optional: target specific file
 # DEBUG_SKIP_EMBEDDINGS = True  # Optional: skip embeddings for faster testing
 # DEBUG_MAX_PAGES = 5  # Optional: limit to first 5 pages
+# DEBUG_SAVE_INTERMEDIATES = True  # Optional: save all intermediate files
 
 # Token limits for different section types
 TOKEN_LIMITS = {
@@ -200,6 +201,43 @@ if DEBUG_MODE and DEBUG_SAVE_INTERMEDIATES:
 # DEBUG HELPER FUNCTIONS
 # ========================================
 
+def create_summary_table(title: str, data: List[Dict], columns: List[str]) -> str:
+    """Create a formatted table for debug output"""
+    if not data:
+        return f"\n{title}\n{'='*len(title)}\nNo data available\n"
+    
+    # Calculate column widths
+    col_widths = {}
+    for col in columns:
+        col_widths[col] = max(len(col), max(len(str(row.get(col, ''))) for row in data))
+    
+    # Create table
+    table = f"\n{title}\n{'='*len(title)}\n"
+    
+    # Header
+    header = " | ".join(col.ljust(col_widths[col]) for col in columns)
+    table += header + "\n"
+    table += "-" * len(header) + "\n"
+    
+    # Rows
+    for row in data:
+        row_str = " | ".join(str(row.get(col, '')).ljust(col_widths[col]) for col in columns)
+        table += row_str + "\n"
+    
+    return table
+
+def create_processing_summary(stage: str, stats: Dict) -> str:
+    """Create a processing stage summary"""
+    summary = f"\n{'='*60}\n"
+    summary += f"STAGE SUMMARY: {stage}\n"
+    summary += f"{'='*60}\n"
+    
+    for key, value in stats.items():
+        summary += f"{key}: {value}\n"
+    
+    summary += f"{'='*60}\n"
+    return summary
+
 def debug_save_to_file(content: str, filename: str, description: str = ""):
     """Save content to debug file if in debug mode"""
     if not DEBUG_MODE or not DEBUG_SAVE_INTERMEDIATES:
@@ -243,22 +281,25 @@ def debug_log_llm_call(prompt_type: str, prompt: str, response: str = None):
     
     timestamp = datetime.now().strftime("%H%M%S")
     
-    # Save prompt
-    debug_save_to_file(
-        prompt, 
-        f"{timestamp}_{prompt_type}_prompt.txt",
-        f"{prompt_type} prompt"
-    )
-    
-    # Save response if provided
-    if response:
+    # Only save files if intermediates are enabled
+    if DEBUG_SAVE_INTERMEDIATES:
+        # Save prompt
         debug_save_to_file(
-            response,
-            f"{timestamp}_{prompt_type}_response.txt", 
-            f"{prompt_type} response"
+            prompt, 
+            f"{timestamp}_{prompt_type}_prompt.txt",
+            f"{prompt_type} prompt"
         )
+        
+        # Save response if provided
+        if response:
+            debug_save_to_file(
+                response,
+                f"{timestamp}_{prompt_type}_response.txt", 
+                f"{prompt_type} response"
+            )
     
-    logger.debug(f"DEBUG LLM: {prompt_type} call - prompt length: {len(prompt)} chars")
+    # Only log essential info
+    logger.debug(f"LLM {prompt_type}: {len(prompt)} chars → {len(response) if response else 'pending'} chars")
 
 # ========================================
 # DATA CLASSES
@@ -459,17 +500,34 @@ def extract_pdf_text_indexed(pdf_content: BytesIO) -> List[Dict[str, Any]]:
             if DEBUG_MODE:
                 logger.debug(f"DEBUG: Page {page_num + 1} - {len(page_data['lines'])} lines extracted")
         
-        # Save extracted pages in debug mode
+        # Create extraction summary
+        page_stats = []
+        for page in pages:
+            page_stats.append({
+                'Page': page['page_number'],
+                'Lines': len(page['lines']),
+                'Start_Line': page['start_line'],
+                'End_Line': page['end_line']
+            })
+        
         if DEBUG_MODE:
-            debug_save_json(pages, "01_extracted_pages.json", "extracted PDF pages with line indexing")
+            # Print summary table
+            table = create_summary_table("PDF EXTRACTION SUMMARY", page_stats, ['Page', 'Lines', 'Start_Line', 'End_Line'])
+            logger.info(table)
             
-            # Save a formatted text version for easy reading
-            formatted_text = ""
-            for page in pages:
-                formatted_text += f"\n=== PAGE {page['page_number']} ===\n"
-                for line in page['lines']:
-                    formatted_text += f"Line {line['global_line_number']}: {line['text']}\n"
-            debug_save_to_file(formatted_text, "01_extracted_text_formatted.txt", "formatted extracted text")
+            # Create processing summary
+            extraction_stats = {
+                'Total Pages': len(pages),
+                'Total Lines': global_line_number,
+                'Average Lines per Page': f"{global_line_number / len(pages):.1f}",
+                'Pages Processed': f"{pages_to_process}/{total_pages}" if DEBUG_MAX_PAGES else f"{total_pages}/{total_pages}"
+            }
+            summary = create_processing_summary("PDF Text Extraction", extraction_stats)
+            logger.info(summary)
+            
+            # Save files only if intermediates enabled
+            if DEBUG_SAVE_INTERMEDIATES:
+                debug_save_json(pages, "01_extracted_pages.json", "extracted PDF pages with line indexing")
         
         logger.info(f"Extracted indexed text from {len(pages)} pages, {global_line_number} lines total")
         return pages
@@ -584,26 +642,47 @@ def call_openai_with_retry(client: OpenAI, messages: List[Dict],
             else:
                 raise
 
+def truncate_text_for_embedding(text: str, max_tokens: int = 8000) -> str:
+    """Truncate text to fit within embedding token limits"""
+    token_count = count_tokens(text)
+    
+    if token_count <= max_tokens:
+        return text
+    
+    # Rough estimate: truncate to ~80% of max tokens to be safe
+    target_chars = int(len(text) * (max_tokens * 0.8) / token_count)
+    truncated = text[:target_chars]
+    
+    # Try to end at a sentence boundary
+    last_period = truncated.rfind('.')
+    if last_period > target_chars * 0.8:  # If we can find a period in the last 20%
+        truncated = truncated[:last_period + 1]
+    
+    if DEBUG_MODE:
+        logger.debug(f"Truncated text from {token_count} to ~{count_tokens(truncated)} tokens for embedding")
+    
+    return truncated
+
 def generate_embedding(client: OpenAI, text: str) -> List[float]:
     """Generate embedding for text"""
     if DEBUG_MODE and DEBUG_SKIP_EMBEDDINGS:
-        logger.debug("DEBUG: Skipping embedding generation (DEBUG_SKIP_EMBEDDINGS=True)")
+        logger.debug("Skipping embedding generation (DEBUG_SKIP_EMBEDDINGS=True)")
         return [0.0] * EMBEDDING_DIMENSIONS  # Return dummy embedding
     
     try:
-        if DEBUG_MODE:
-            logger.debug(f"DEBUG: Generating embedding for text of length {len(text)}")
+        # Truncate text if it's too long
+        truncated_text = truncate_text_for_embedding(text)
         
         response = client.embeddings.create(
             model=EMBEDDING_MODEL,
-            input=text,
+            input=truncated_text,
             dimensions=EMBEDDING_DIMENSIONS
         )
         
         embedding = response.data[0].embedding
         
-        if DEBUG_MODE:
-            logger.debug(f"DEBUG: Generated embedding with {len(embedding)} dimensions")
+        if DEBUG_MODE and len(text) != len(truncated_text):
+            logger.debug(f"Generated embedding (truncated {len(text)} → {len(truncated_text)} chars)")
         
         return embedding
     except Exception as e:
@@ -737,6 +816,19 @@ def identify_bank_with_retry(first_words: str, client: OpenAI) -> BankInfo:
         logger.info(f"Bank not recognized on first attempt: {bank_info.detected_name}. Retrying...")
         bank_info = identify_bank_name(first_words, client)
     
+    # Create identification summary
+    if DEBUG_MODE:
+        bank_stats = {
+            'Detected Name': bank_info.detected_name,
+            'Standardized Name': bank_info.standardized_name,
+            'Ticker:Region': bank_info.ticker_region,
+            'Confidence': f"{bank_info.confidence:.2f}",
+            'Recognized': 'Yes' if bank_info.recognized else 'No',
+            'Input Length': f"{len(first_words)} chars"
+        }
+        summary = create_processing_summary("Bank Identification", bank_stats)
+        logger.info(summary)
+    
     return bank_info
 
 # ========================================
@@ -778,51 +870,74 @@ def identify_primary_sections_progressive(pages: List[Dict], client: OpenAI) -> 
         if next_page:
             next_page_context = f"\nNext page context (for reference only):\n{format_page_for_llm(next_page)}"
         
+        # Create tool for structured section identification
+        section_identification_tool = {
+            "type": "function",
+            "function": {
+                "name": "identify_sections",
+                "description": "Identify primary transcript sections on the current page",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "page_number": {
+                            "type": "integer",
+                            "description": "The page number being analyzed"
+                        },
+                        "sections": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "section_name": {
+                                        "type": "string",
+                                        "enum": PRIMARY_SECTIONS,
+                                        "description": "Name of the primary section"
+                                    },
+                                    "start_line": {
+                                        "type": "integer",
+                                        "description": "Global line number where section starts"
+                                    },
+                                    "end_line": {
+                                        "type": "integer", 
+                                        "description": "Global line number where section ends"
+                                    },
+                                    "confidence": {
+                                        "type": "number",
+                                        "description": "Confidence level 0.0-1.0"
+                                    }
+                                },
+                                "required": ["section_name", "start_line", "end_line", "confidence"]
+                            }
+                        }
+                    },
+                    "required": ["page_number", "sections"]
+                }
+            }
+        }
+
         # Create prompt
-        prompt = f"""Analyze this earnings call transcript page and identify which primary sections are present.
+        prompt = f"""Analyze page {current_page['page_number']} to identify primary transcript sections.
 
-Primary sections (in typical order):
-1. Safe Harbor Statement - Legal disclaimers about forward-looking statements
-2. Introduction - Opening remarks, agenda, participant introductions
-3. Management Discussion - Management's prepared remarks about performance
-4. Financial Performance - Detailed financial metrics and analysis
-5. Investor Q&A - Question and answer session with analysts
-6. Closing Remarks - Final statements and call conclusion
+Expected sections: {', '.join(PRIMARY_SECTIONS)}
 
-{previous_context}Current page to analyze:
+{previous_context}Current page content:
 {current_page_text}
 {next_page_context}
 
-For the CURRENT PAGE ONLY, identify:
-1. Which primary sections are present on this page
-2. For each section, provide the line number range where it appears
-3. If there are section transitions, identify the exact line where they occur
-
-Return JSON format:
-{{
-    "page_number": {current_page['page_number']},
-    "sections": [
-        {{
-            "section_name": "Section Name",
-            "start_line": line_number,
-            "end_line": line_number,
-            "confidence": 0.0-1.0
-        }}
-    ]
-}}
-
-Focus only on the current page. Use the previous context and next page only as reference.
-"""
+Instructions:
+- Only analyze the CURRENT page
+- If a section spans multiple pages, mark the portion on THIS page
+- Use exact global line numbers from the transcript
+- Only identify clear section boundaries, not assumptions"""
 
         messages = [
-            {"role": "system", "content": "You are an expert at analyzing earnings call transcript structure."},
+            {"role": "system", "content": "You analyze earnings call transcripts to identify section boundaries."},
             {"role": "user", "content": prompt}
         ]
         
         try:
-            if DEBUG_MODE:
-                logger.debug(f"DEBUG: Processing page {current_page['page_number']} with {len(current_page['lines'])} lines")
-                # Save the prompt for this page
+            # Save debug files only if intermediates enabled
+            if DEBUG_MODE and DEBUG_SAVE_INTERMEDIATES:
                 debug_save_to_file(
                     prompt, 
                     f"03_page_{current_page['page_number']:02d}_prompt.txt",
@@ -831,12 +946,12 @@ Focus only on the current page. Use the previous context and next page only as r
             
             response = call_openai_with_retry(
                 client, 
-                messages, 
-                response_format={"type": "json_object"}
+                messages,
+                tools=[section_identification_tool]
             )
             
-            if DEBUG_MODE:
-                # Save the response for this page
+            # Save response only if intermediates enabled
+            if DEBUG_MODE and DEBUG_SAVE_INTERMEDIATES:
                 debug_save_to_file(
                     response,
                     f"03_page_{current_page['page_number']:02d}_response.json",
@@ -860,12 +975,9 @@ Focus only on the current page. Use the previous context and next page only as r
                     'end_line': section['end_line'],
                     'confidence': section.get('confidence', 0.8)
                 })
-                
-                if DEBUG_MODE:
-                    logger.debug(f"DEBUG: Found section '{section['section_name']}' on page {current_page['page_number']} (lines {section['start_line']}-{section['end_line']})")
             
             section_results.append(page_result)
-            logger.info(f"Page {current_page['page_number']} sections: {page_result['sections']}")
+            logger.info(f"Page {current_page['page_number']}: {page_result['sections'] or 'No sections'}")
             
         except Exception as e:
             logger.error(f"Error processing page {current_page['page_number']}: {str(e)}")
@@ -877,15 +989,41 @@ Focus only on the current page. Use the previous context and next page only as r
     # Consolidate overlapping sections and create final boundaries
     consolidated_sections = consolidate_section_boundaries(identified_sections)
     
-    # Save debug output
+    # Create section identification summary
     if DEBUG_MODE:
-        debug_save_json(section_results, "03_page_results.json", "page-by-page section identification results")
-        debug_save_json(identified_sections, "03_identified_sections.json", "all identified section boundaries")
-        debug_save_json(consolidated_sections, "03_consolidated_sections.json", "final consolidated section boundaries")
-        
-        logger.debug(f"DEBUG: Section identification complete - {len(consolidated_sections)} primary sections identified")
+        # Primary sections table
+        section_stats = []
         for section in consolidated_sections:
-            logger.debug(f"DEBUG: - {section['section_name']}: lines {section['start_line']}-{section['end_line']}")
+            line_count = section['end_line'] - section['start_line'] + 1
+            section_stats.append({
+                'Section': section['section_name'],
+                'Start_Line': section['start_line'],
+                'End_Line': section['end_line'], 
+                'Lines': line_count,
+                'Confidence': f"{section['confidence']:.2f}",
+                'Pages': f"{section['page_span'][0]}-{section['page_span'][1]}"
+            })
+        
+        table = create_summary_table("PRIMARY SECTIONS IDENTIFIED", section_stats, 
+                                   ['Section', 'Start_Line', 'End_Line', 'Lines', 'Confidence', 'Pages'])
+        logger.info(table)
+        
+        # Overall stats
+        total_lines = sum(s['end_line'] - s['start_line'] + 1 for s in consolidated_sections)
+        primary_stats = {
+            'Total Primary Sections': len(consolidated_sections),
+            'Total Lines Covered': total_lines,
+            'Average Section Length': f"{total_lines / len(consolidated_sections):.1f} lines" if consolidated_sections else "0",
+            'Pages Analyzed': len(section_results),
+            'Expected Sections': len(PRIMARY_SECTIONS),
+            'Coverage': f"{len(consolidated_sections)}/{len(PRIMARY_SECTIONS)}"
+        }
+        summary = create_processing_summary("Primary Section Identification", primary_stats)
+        logger.info(summary)
+        
+        # Save files only if intermediates enabled
+        if DEBUG_SAVE_INTERMEDIATES:
+            debug_save_json(consolidated_sections, "03_consolidated_sections.json", "final consolidated section boundaries")
     
     return consolidated_sections
 
@@ -939,84 +1077,121 @@ def create_secondary_sections(primary_content: str, primary_type: str, client: O
     """Break primary section into secondary sections"""
     debug_log_step("Secondary Section Creation", f"Breaking down {primary_type} section into secondary sections")
     
-    if DEBUG_MODE:
-        logger.debug(f"DEBUG: Processing {primary_type} section with {len(primary_content)} characters")
+    # Create tool for structured output
+    section_breakdown_tool = {
+        "type": "function",
+        "function": {
+            "name": "create_sections",
+            "description": "Break down a primary transcript section into logical secondary sections",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "sections": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "name": {
+                                    "type": "string",
+                                    "description": "Descriptive name for the subsection"
+                                },
+                                "content": {
+                                    "type": "string", 
+                                    "description": "Full text content for this subsection"
+                                },
+                                "rationale": {
+                                    "type": "string",
+                                    "description": "Brief explanation of why this is a distinct subsection"
+                                }
+                            },
+                            "required": ["name", "content", "rationale"]
+                        }
+                    }
+                },
+                "required": ["sections"]
+            }
+        }
+    }
     
-    prompt = f"""Break down this {primary_type} section into logical secondary sections based on distinct topics or themes.
+    # Truncate content if too long for LLM context
+    max_chars = 15000  # Leave room for prompt
+    truncated_content = primary_content[:max_chars]
+    if len(primary_content) > max_chars:
+        # Try to end at sentence boundary
+        last_period = truncated_content.rfind('.')
+        if last_period > max_chars * 0.8:
+            truncated_content = truncated_content[:last_period + 1]
+        logger.warning(f"Truncated {primary_type} content from {len(primary_content)} to {len(truncated_content)} chars")
+    
+    prompt = f"""Break down this {primary_type} section into 3-6 logical secondary sections.
 
-Primary section content:
-{primary_content}
+Guidelines:
+- Each section should have 50+ words and represent a distinct topic
+- Look for natural breaks: speaker changes, topic shifts, new metrics
+- Common patterns for {primary_type}: financial metrics, strategic updates, operational highlights
 
-Guidelines for creating secondary sections:
-1. Each secondary section should represent a coherent subtopic
-2. Secondary sections should be substantial enough to stand alone (minimum 3-4 sentences)
-3. Look for natural breaks like topic changes, new speakers, or different metrics
-4. These secondary sections will become the final chunks for embedding
+Section content to analyze:
+{truncated_content}
 
-Common secondary section patterns:
-- For "Management Discussion": Revenue Performance, Cost Management, Strategic Updates, etc.
-- For "Financial Performance": Net Interest Income, Credit Losses, Capital Ratios, etc.
-- For "Investor Q&A": Individual analyst questions and responses
-- For "Introduction": Welcome Remarks, Agenda Overview, Safe Harbor, etc.
-
-Return JSON format:
-{{
-    "secondary_sections": [
-        {{
-            "name": "Descriptive Secondary Section Name",
-            "content": "Full text content for this section",
-            "rationale": "Why this is a distinct section"
-        }}
-    ]
-}}
-
-Ensure each secondary section is substantial and represents a clear subtopic within the {primary_type}.
-"""
+Use the tool to return the secondary sections."""
 
     messages = [
-        {"role": "system", "content": "You are an expert at analyzing financial document structure and creating logical content divisions."},
+        {"role": "system", "content": "You are an expert at analyzing financial transcript structure."},
         {"role": "user", "content": prompt}
     ]
     
     try:
         # Save debug information
-        if DEBUG_MODE:
-            debug_save_to_file(primary_content, f"04_{primary_type.replace(' ', '_').lower()}_content.txt", f"{primary_type} section content")
-            debug_save_to_file(prompt, f"04_{primary_type.replace(' ', '_').lower()}_prompt.txt", f"{primary_type} secondary section prompt")
+        if DEBUG_MODE and DEBUG_SAVE_INTERMEDIATES:
+            debug_save_to_file(truncated_content, f"04_{primary_type.replace(' ', '_').lower()}_content.txt", f"{primary_type} section content")
         
         response = call_openai_with_retry(
             client, 
-            messages, 
-            response_format={"type": "json_object"}
+            messages,
+            tools=[section_breakdown_tool]
         )
         
-        if DEBUG_MODE:
-            debug_save_to_file(response, f"04_{primary_type.replace(' ', '_').lower()}_response.json", f"{primary_type} secondary section response")
-        
         result = json.loads(response)
-        secondary_sections = []
+        sections_data = result.get('sections', [])
         
-        for section in result.get('secondary_sections', []):
+        secondary_sections = []
+        for section in sections_data:
             secondary_sections.append({
                 'name': section['name'],
                 'content': clean_transcript_text(section['content']),
                 'rationale': section.get('rationale', '')
             })
         
-        if DEBUG_MODE:
-            logger.debug(f"DEBUG: Created {len(secondary_sections)} secondary sections for {primary_type}")
-            for i, sec in enumerate(secondary_sections):
-                logger.debug(f"DEBUG: - {i+1}. {sec['name']} ({len(sec['content'])} chars)")
+        # Log summary
+        logger.info(f"Created {len(secondary_sections)} secondary sections for {primary_type}")
         
         return secondary_sections
         
     except Exception as e:
-        logger.error(f"Error creating secondary sections: {str(e)}")
-        # Fallback: return entire content as single section
+        logger.error(f"Error creating secondary sections for {primary_type}: {str(e)}")
+        # Fallback: split by paragraphs or return as single section
+        paragraphs = [p.strip() for p in truncated_content.split('\n\n') if p.strip()]
+        
+        if len(paragraphs) > 1:
+            # Create sections from paragraphs
+            secondary_sections = []
+            for i, para in enumerate(paragraphs[:5], 1):  # Max 5 sections
+                if len(para) > 50:  # Only substantial paragraphs
+                    secondary_sections.append({
+                        'name': f"{primary_type} - Part {i}",
+                        'content': clean_transcript_text(para),
+                        'rationale': f'Paragraph-based division due to parsing error'
+                    })
+            
+            if secondary_sections:
+                logger.warning(f"Used paragraph fallback for {primary_type}: {len(secondary_sections)} sections")
+                return secondary_sections
+        
+        # Final fallback: single section
         return [{
-            'name': f"{primary_type} - Full Content",
-            'content': clean_transcript_text(primary_content),
-            'rationale': 'Failed to subdivide - using entire section'
+            'name': f"{primary_type} - Complete",
+            'content': clean_transcript_text(truncated_content),
+            'rationale': 'Single section fallback due to parsing error'
         }]
 
 # ========================================
@@ -1027,19 +1202,20 @@ def generate_summary(content: str, section_type: str, client: OpenAI) -> str:
     """Generate summary for a section"""
     token_limit = TOKEN_LIMITS.get(section_type, 150)
     
-    prompt = f"""Generate a concise summary of this {section_type}.
+    prompt = f"""TASK: Generate a concise {token_limit}-token summary of this {section_type}.
 
-Content:
+CONTENT TO SUMMARIZE:
 {content}
 
-Create a {token_limit}-token summary that:
-1. Captures key financial metrics and specific numbers
-2. Highlights main themes and messages
-3. Includes any forward-looking statements or guidance
-4. Notes significant changes or comparisons
+SUMMARY REQUIREMENTS:
+• Capture key financial metrics with specific numbers
+• Highlight main themes and strategic messages
+• Include forward-looking statements and guidance
+• Note significant changes, comparisons, or trends
+• Focus on factual information valuable for financial analysis
+• Use precise, professional language
 
-Focus on factual, specific information that would be valuable for financial analysis.
-Return only the summary text, no additional formatting.
+FORMAT: Return only the summary text with no additional formatting or preamble.
 """
 
     messages = [
@@ -1062,64 +1238,64 @@ def calculate_context_relevance_scores(sections: List[Dict], current_index: int,
     prev_section = sections[current_index - 1] if current_index > 0 else None
     next_section = sections[current_index + 1] if current_index < len(sections) - 1 else None
     
+    # Create tool for structured scoring
+    scoring_tool = {
+        "type": "function",
+        "function": {
+            "name": "score_section",
+            "description": "Score transcript section importance and context dependencies",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "importance_score": {
+                        "type": "number",
+                        "minimum": 0.0,
+                        "maximum": 1.0,
+                        "description": "How critical this information is for investors (0.0-1.0)"
+                    },
+                    "preceding_context_relevance": {
+                        "type": "number", 
+                        "minimum": 0.0,
+                        "maximum": 1.0,
+                        "description": "How much understanding depends on previous section (0.0-1.0)"
+                    },
+                    "following_context_relevance": {
+                        "type": "number",
+                        "minimum": 0.0, 
+                        "maximum": 1.0,
+                        "description": "How much understanding depends on following section (0.0-1.0)"
+                    }
+                },
+                "required": ["importance_score", "preceding_context_relevance", "following_context_relevance"]
+            }
+        }
+    }
+    
     # Build context for scoring
-    context_text = f"Primary Section Summary: {primary_summary}\n\n"
-    context_text += f"Current Section: {current_section['secondary_section_type']}\n"
-    context_text += f"Content: {current_section['secondary_section_summary']}\n\n"
-    
-    if prev_section:
-        context_text += f"Previous Section: {prev_section['secondary_section_type']}\n"
-        context_text += f"Previous Content: {prev_section['secondary_section_summary']}\n\n"
-    
-    if next_section:
-        context_text += f"Next Section: {next_section['secondary_section_type']}\n"
-        context_text += f"Next Content: {next_section['secondary_section_summary']}\n\n"
-    
-    prompt = f"""Rate the importance and context dependencies of this transcript section.
+    prompt = f"""Score this transcript section for importance and context dependencies.
 
-{context_text}
+PRIMARY SECTION: {primary_summary[:200]}
 
-Provide scores (0.0-1.0) for:
+CURRENT SECTION: {current_section['secondary_section_type']}
+Summary: {current_section['secondary_section_summary']}
 
-1. importance_score: How critical is this information for investors/analysts?
-   - 0.9-1.0: Critical financial metrics, major announcements, forward guidance
-   - 0.7-0.8: Important operational updates, significant changes
-   - 0.5-0.6: Routine updates, standard disclosures
-   - 0.3-0.4: Minor details, procedural content
-   - 0.0-0.2: Minimal relevance
+PREVIOUS: {prev_section['secondary_section_type'] if prev_section else 'None'}
+NEXT: {next_section['secondary_section_type'] if next_section else 'None'}
 
-2. preceding_context_relevance: How important is the previous section for understanding this section?
-   - 0.8-1.0: Cannot understand without previous context
-   - 0.5-0.7: Helpful context but not essential
-   - 0.0-0.4: Minimal dependency on previous section
-   - 0.0: No dependency (first section or standalone)
-
-3. following_context_relevance: How important is the next section for understanding this section?
-   - 0.8-1.0: Incomplete without following context
-   - 0.5-0.7: Enhanced by following context
-   - 0.0-0.4: Minimal dependency on following section
-   - 0.0: No dependency (last section or standalone)
-
-Consider financial materiality, strategic importance, and contextual dependencies.
-
-Return JSON format:
-{{
-    "importance_score": 0.0-1.0,
-    "preceding_context_relevance": 0.0-1.0,
-    "following_context_relevance": 0.0-1.0
-}}
-"""
+Scoring guidelines:
+- Importance: Financial metrics/guidance (0.8-1.0), Operations (0.5-0.7), Procedural (0.0-0.4)
+- Context dependency: Critical (0.8-1.0), Helpful (0.5-0.7), Minimal (0.0-0.4)"""
 
     messages = [
-        {"role": "system", "content": "You are an expert at evaluating financial information importance and context dependencies."},
+        {"role": "system", "content": "You evaluate financial information importance and context dependencies."},
         {"role": "user", "content": prompt}
     ]
     
     try:
         response = call_openai_with_retry(
             client, 
-            messages, 
-            response_format={"type": "json_object"}
+            messages,
+            tools=[scoring_tool]
         )
         
         result = json.loads(response)
@@ -1479,42 +1655,52 @@ def process_transcript(nas_conn: SMBConnection, file_info: Dict, client: OpenAI)
         
         logger.info(f"Successfully processed {file_info['filename']} with {len(all_sections)} sections")
         
-        # Save final debug output
+        # Create final processing summary
         if DEBUG_MODE:
-            debug_save_json([asdict(s) for s in all_sections], "05_final_sections.json", "final processed sections")
-            
-            # Create a readable summary
-            summary = f"""PROCESSING SUMMARY FOR {file_info['filename']}
-{'='*60}
-
-Bank Information:
-- Detected Name: {bank_info.detected_name}
-- Standardized Name: {bank_info.standardized_name}
-- Ticker Region: {bank_info.ticker_region}
-- Recognition Confidence: {bank_info.confidence}
-
-Primary Sections Found: {len(primary_section_names)}
-{chr(10).join(f"- {name}" for name in primary_section_names)}
-
-Secondary Sections Created: {len(all_sections)}
-Total Tokens: {total_tokens}
-Processing Time: {status.processing_time:.2f} seconds
-
-Section Details:
-"""
+            # Secondary sections table
+            secondary_stats = []
             for i, section in enumerate(all_sections, 1):
-                summary += f"""
-{i}. {section.secondary_section_type}
-   Primary: {section.primary_section_type}
-   Tokens: {section.section_tokens}
-   Importance: {section.importance_score:.2f}
-   Preceding Context: {section.preceding_context_relevance:.2f}
-   Following Context: {section.following_context_relevance:.2f}
-   Content Preview: {section.section_content[:100]}...
-"""
+                secondary_stats.append({
+                    'Order': i,
+                    'Primary': section.primary_section_type,
+                    'Secondary': section.secondary_section_type[:40] + '...' if len(section.secondary_section_type) > 40 else section.secondary_section_type,
+                    'Tokens': section.section_tokens,
+                    'Importance': f"{section.importance_score:.2f}" if section.importance_score else "N/A",
+                    'Prev_Ctx': f"{section.preceding_context_relevance:.2f}" if section.preceding_context_relevance else "0.00",
+                    'Next_Ctx': f"{section.following_context_relevance:.2f}" if section.following_context_relevance else "0.00"
+                })
             
-            debug_save_to_file(summary, "05_processing_summary.txt", "complete processing summary")
-            logger.debug(f"DEBUG: Processing complete - {len(all_sections)} sections created, check {DEBUG_OUTPUT_DIR} for detailed outputs")
+            table = create_summary_table("FINAL SECONDARY SECTIONS", secondary_stats[:10],  # Show first 10
+                                       ['Order', 'Primary', 'Secondary', 'Tokens', 'Importance', 'Prev_Ctx', 'Next_Ctx'])
+            logger.info(table)
+            
+            if len(all_sections) > 10:
+                logger.info(f"... and {len(all_sections) - 10} more sections")
+            
+            # Final processing stats
+            primary_breakdown = {}
+            for section in all_sections:
+                primary_breakdown[section.primary_section_type] = primary_breakdown.get(section.primary_section_type, 0) + 1
+            
+            final_stats = {
+                'Total Processing Time': f"{status.processing_time:.2f} seconds",
+                'Bank': f"{bank_info.standardized_name} ({bank_info.ticker_region})",
+                'Primary Sections': len(primary_section_names),
+                'Secondary Sections': len(all_sections),
+                'Total Tokens': total_tokens,
+                'Average Tokens/Section': f"{total_tokens / len(all_sections):.0f}" if all_sections else "0",
+                'Embedding Status': 'Generated' if not (DEBUG_MODE and DEBUG_SKIP_EMBEDDINGS) else 'Skipped (Debug)'
+            }
+            
+            breakdown_str = ', '.join([f"{k}: {v}" for k, v in primary_breakdown.items()])
+            final_stats['Section Breakdown'] = breakdown_str
+            
+            summary = create_processing_summary("Final Processing Results", final_stats)
+            logger.info(summary)
+            
+            # Save final data only if intermediates enabled
+            if DEBUG_SAVE_INTERMEDIATES:
+                debug_save_json([asdict(s) for s in all_sections], "05_final_sections.json", "final processed sections")
         
         # Note: In this version, we don't store sections in database
         # The sections are processed and could be stored in a separate JSON file
