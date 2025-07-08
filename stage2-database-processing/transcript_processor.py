@@ -343,6 +343,7 @@ class ProcessingStatus:
     section_count: Optional[int] = None
     primary_sections: Optional[List[str]] = None
     total_tokens: Optional[int] = None
+    sections: Optional[List[Dict]] = None  # Section records for master database
 
 @dataclass
 class BankInfo:
@@ -1793,9 +1794,41 @@ def process_transcript(nas_conn: SMBConnection, file_info: Dict, client: OpenAI)
             if DEBUG_SAVE_INTERMEDIATES:
                 debug_save_json([asdict(s) for s in all_sections], "05_final_sections.json", "final processed sections")
         
-        # Note: In this version, we don't store sections in database
-        # The sections are processed and could be stored in a separate JSON file
-        # or handled by another process that reads the master database
+        # Store all sections in master database (mirrors PostgreSQL schema)
+        status.section_count = len(all_sections)
+        logger.info(f"✓ Processing complete: {len(all_sections)} sections created")
+        
+        # Convert sections to DataFrame records for master database
+        section_records = []
+        for section in all_sections:
+            # Convert embedding to string for CSV storage
+            embedding_str = ','.join(map(str, section.section_embedding)) if section.section_embedding else ''
+            
+            section_records.append({
+                'fiscal_year': section.fiscal_year,
+                'quarter': section.quarter,
+                'bank_name': section.bank_name,
+                'ticker_region': section.ticker_region,
+                'filepath': section.filepath,
+                'filename': section.filename,
+                'date_last_modified': section.date_last_modified,
+                'primary_section_type': section.primary_section_type,
+                'primary_section_summary': section.primary_section_summary,
+                'secondary_section_type': section.secondary_section_type,
+                'secondary_section_summary': section.secondary_section_summary,
+                'section_content': section.section_content,
+                'section_order': section.section_order,
+                'section_tokens': section.section_tokens,
+                'section_embedding': embedding_str,
+                'importance_score': section.importance_score,
+                'preceding_context_relevance': section.preceding_context_relevance,
+                'following_context_relevance': section.following_context_relevance,
+                'created_at': section.created_at,
+                'updated_at': section.updated_at
+            })
+        
+        # Return sections for storage in main function
+        status.sections = section_records
         
     except Exception as e:
         logger.error(f"Error processing {file_info['filename']}: {str(e)}")
@@ -1909,25 +1942,18 @@ def main():
                     # Process file
                     status = process_transcript(nas_conn, file_info, openai_client)
                     
-                    # Add to master database
-                    new_row = {
-                        'filepath': status.filepath,
-                        'filename': file_info['filename'],
-                        'bank_name': 'Unknown',  # Will be updated if processing succeeds
-                        'ticker_region': 'Unknown',
-                        'fiscal_year': file_info['fiscal_year'],
-                        'quarter': file_info['quarter'],
-                        'last_modified': file_info['last_modified'],
-                        'last_processed': status.last_processed,
-                        'status': status.status,
-                        'error_message': status.error_message,
-                        'processing_time_seconds': status.processing_time,
-                        'section_count': status.section_count,
-                        'primary_sections': json.dumps(status.primary_sections) if status.primary_sections else None,
-                        'total_tokens': status.total_tokens
-                    }
-                    
-                    master_df = pd.concat([master_df, pd.DataFrame([new_row])], ignore_index=True)
+                    # Add sections to master database if processing succeeded
+                    if status.status == 'processed' and status.sections:
+                        # Add all section records to master database
+                        sections_df = pd.DataFrame(status.sections)
+                        master_df = pd.concat([master_df, sections_df], ignore_index=True)
+                        
+                        if DEBUG_MODE:
+                            logger.info(f"✓ Added {len(status.sections)} section records to master database")
+                    else:
+                        # For failed processing, log error
+                        if status.status == 'error':
+                            logger.error(f"✗ Failed to process {file_info['filename']}: {status.error_message}")
                     
                     # Update stats
                     if status.status == 'processed':
