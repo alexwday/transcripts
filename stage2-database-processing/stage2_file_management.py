@@ -52,7 +52,9 @@ NAS_CONFIG = {
     "source_path": "Finance Data and Analytics/DSA/AEGIS/Transcripts/database_refresh",
     "output_path": "Finance Data and Analytics/DSA/AEGIS/Transcripts",
     "master_db_filename": "master_database.csv",
-    "refresh_folder": "database_refresh"
+    "database_folder": "database",
+    "refresh_outputs_folder": "refresh_outputs",
+    "logs_folder": "logs"
 }
 
 # Processing Configuration
@@ -147,7 +149,7 @@ def ensure_directory_exists(conn: SMBConnection, share: str, path: str):
 
 def get_master_database_path() -> str:
     """Get the full path to master database"""
-    return f"{NAS_CONFIG['output_path']}/{NAS_CONFIG['master_db_filename']}"
+    return f"{NAS_CONFIG['output_path']}/{NAS_CONFIG['database_folder']}/{NAS_CONFIG['master_db_filename']}"
 
 def check_master_database_exists(conn: SMBConnection) -> bool:
     """Check if master database exists"""
@@ -175,6 +177,10 @@ def create_master_database(conn: SMBConnection) -> pd.DataFrame:
         # Metadata
         'created_at', 'updated_at'
     ])
+    
+    # Ensure database directory exists
+    database_path = f"{NAS_CONFIG['output_path']}/{NAS_CONFIG['database_folder']}"
+    ensure_directory_exists(conn, NAS_CONFIG['share'], database_path)
     
     # Save to NAS
     master_path = get_master_database_path()
@@ -329,11 +335,11 @@ def compare_files_with_master(current_files: Dict, master_df: pd.DataFrame) -> D
 # ========================================
 
 def save_output_to_nas(conn: SMBConnection, filename: str, data: any, data_type: str = "json"):
-    """Save output file to database_refresh folder"""
-    refresh_path = f"{NAS_CONFIG['output_path']}/{NAS_CONFIG['refresh_folder']}"
+    """Save output file to refresh_outputs folder"""
+    refresh_outputs_path = f"{NAS_CONFIG['output_path']}/{NAS_CONFIG['refresh_outputs_folder']}"
     
-    # Ensure refresh directory exists
-    ensure_directory_exists(conn, NAS_CONFIG['share'], refresh_path)
+    # Ensure refresh_outputs directory exists
+    ensure_directory_exists(conn, NAS_CONFIG['share'], refresh_outputs_path)
     
     # Prepare content
     if data_type == "json":
@@ -346,12 +352,95 @@ def save_output_to_nas(conn: SMBConnection, filename: str, data: any, data_type:
         raise ValueError(f"Unsupported data type: {data_type}")
     
     # Upload file
-    file_path = f"{refresh_path}/{filename}"
+    file_path = f"{refresh_outputs_path}/{filename}"
     upload_file_to_nas(conn, NAS_CONFIG['share'], file_path, content)
 
-def copy_master_to_refresh(conn: SMBConnection, master_df: pd.DataFrame):
-    """Copy master database to refresh folder"""
+def copy_master_to_refresh_outputs(conn: SMBConnection, master_df: pd.DataFrame):
+    """Copy master database to refresh_outputs folder"""
     save_output_to_nas(conn, "01_master_database.csv", master_df, "csv")
+
+# ========================================
+# ERROR LOGGING
+# ========================================
+
+def write_error_log(conn: SMBConnection, errors: List[str], warnings: List[str] = None):
+    """Write error and warning log to NAS logs folder"""
+    if not errors and not warnings:
+        return
+    
+    try:
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        log_filename = f"stage2_file_management_{timestamp}.log"
+        logs_path = f"{NAS_CONFIG['output_path']}/{NAS_CONFIG['logs_folder']}"
+        log_file_path = f"{logs_path}/{log_filename}"
+        
+        # Ensure logs directory exists
+        ensure_directory_exists(conn, NAS_CONFIG['share'], logs_path)
+        
+        # Build log content
+        log_content = f"Stage 2 File Management Log - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+        log_content += "=" * 60 + "\n\n"
+        
+        if errors:
+            log_content += f"ERRORS ({len(errors)}):\n"
+            log_content += "-" * 20 + "\n"
+            for i, error in enumerate(errors, 1):
+                log_content += f"{i}. {error}\n"
+            log_content += "\n"
+        
+        if warnings:
+            log_content += f"WARNINGS ({len(warnings)}):\n"
+            log_content += "-" * 20 + "\n"
+            for i, warning in enumerate(warnings, 1):
+                log_content += f"{i}. {warning}\n"
+            log_content += "\n"
+        
+        # Upload log file
+        upload_file_to_nas(conn, NAS_CONFIG['share'], log_file_path, log_content.encode('utf-8'))
+        logger.info(f"Error log written to: {log_file_path}")
+        
+    except Exception as e:
+        logger.error(f"Failed to write error log: {str(e)}")
+
+def write_summary_log(conn: SMBConnection, summary_stats: Dict):
+    """Write processing summary log to NAS logs folder"""
+    try:
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        log_filename = f"stage2_summary_{timestamp}.log"
+        logs_path = f"{NAS_CONFIG['output_path']}/{NAS_CONFIG['logs_folder']}"
+        log_file_path = f"{logs_path}/{log_filename}"
+        
+        # Ensure logs directory exists
+        ensure_directory_exists(conn, NAS_CONFIG['share'], logs_path)
+        
+        # Build summary content
+        log_content = f"Stage 2 File Management Summary - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+        log_content += "=" * 60 + "\n\n"
+        
+        log_content += "PROCESSING RESULTS:\n"
+        log_content += "-" * 20 + "\n"
+        for key, value in summary_stats.items():
+            log_content += f"{key}: {value}\n"
+        log_content += "\n"
+        
+        log_content += "FILES PROCESSED:\n"
+        log_content += "-" * 20 + "\n"
+        if 'files_to_add' in summary_stats:
+            log_content += f"Files to add: {summary_stats['files_to_add']}\n"
+        if 'files_to_delete' in summary_stats:
+            log_content += f"Files to delete: {summary_stats['files_to_delete']}\n"
+        if 'total_nas_files' in summary_stats:
+            log_content += f"Total NAS files: {summary_stats['total_nas_files']}\n"
+        if 'master_db_records' in summary_stats:
+            log_content += f"Master DB records: {summary_stats['master_db_records']}\n"
+        
+        # Upload summary log
+        upload_file_to_nas(conn, NAS_CONFIG['share'], log_file_path, log_content.encode('utf-8'))
+        logger.info(f"Summary log written to: {log_file_path}")
+        
+    except Exception as e:
+        logger.error(f"Failed to write summary log: {str(e)}")
+        # Don't raise here as this is just logging
 
 # ========================================
 # MAIN EXECUTION
@@ -359,64 +448,158 @@ def copy_master_to_refresh(conn: SMBConnection, master_df: pd.DataFrame):
 
 def main():
     """Main execution function"""
+    start_time = datetime.now()
     logger.info("Starting Stage 2: File Management")
     logger.info("=" * 50)
     
     nas_conn = None
+    errors = []
+    warnings = []
     
     try:
         # Connect to NAS
         logger.info(f"Connecting to NAS ({NAS_IP})...")
-        nas_conn = create_smb_connection(NAS_IP, NAS_USERNAME, NAS_PASSWORD, NAS_PORT)
+        try:
+            nas_conn = create_smb_connection(NAS_IP, NAS_USERNAME, NAS_PASSWORD, NAS_PORT)
+            logger.info("✓ NAS connection established successfully")
+        except Exception as e:
+            error_msg = f"Failed to connect to NAS: {str(e)}"
+            logger.error(error_msg)
+            errors.append(error_msg)
+            raise
         
         # Step 1: Read/Create master database
         logger.info("\nStep 1: Master Database Check")
-        master_df = read_master_database(nas_conn)
+        try:
+            master_df = read_master_database(nas_conn)
+            if len(master_df) == 0:
+                logger.info("✓ Master database created (was empty)")
+            else:
+                logger.info(f"✓ Master database loaded with {len(master_df)} records")
+        except Exception as e:
+            error_msg = f"Failed to read/create master database: {str(e)}"
+            logger.error(error_msg)
+            errors.append(error_msg)
+            raise
         
         # Step 2: Scan for transcript files
         logger.info("\nStep 2: Scanning for Transcript Files")
-        current_files = scan_for_transcripts(nas_conn)
+        try:
+            current_files = scan_for_transcripts(nas_conn)
+            logger.info(f"✓ Found {len(current_files)} transcript files in NAS")
+            
+            if len(current_files) == 0:
+                warning_msg = "No transcript files found in NAS database_refresh folder"
+                logger.warning(warning_msg)
+                warnings.append(warning_msg)
+                
+        except Exception as e:
+            error_msg = f"Failed to scan transcript files: {str(e)}"
+            logger.error(error_msg)
+            errors.append(error_msg)
+            raise
         
         # Step 3: Compare files with master
         logger.info("\nStep 3: Comparing Files with Master Database")
-        file_comparison = compare_files_with_master(current_files, master_df)
+        try:
+            file_comparison = compare_files_with_master(current_files, master_df)
+            logger.info("✓ File comparison completed successfully")
+            
+            # Log detailed comparison results
+            logger.info(f"  - New files found: {len(file_comparison['new_files'])}")
+            logger.info(f"  - Modified files found: {len(file_comparison['modified_files'])}")
+            logger.info(f"  - Deleted files found: {len(file_comparison['deleted_files'])}")
+            
+            if len(file_comparison['new_files']) == 0 and len(file_comparison['modified_files']) == 0:
+                logger.info("  - No files require processing")
+            
+        except Exception as e:
+            error_msg = f"Failed to compare files with master database: {str(e)}"
+            logger.error(error_msg)
+            errors.append(error_msg)
+            raise
         
         # Step 4: Generate output files
         logger.info("\nStep 4: Generating Output Files")
+        try:
+            # Copy master database to refresh_outputs folder
+            copy_master_to_refresh_outputs(nas_conn, master_df)
+            logger.info("✓ Copied master database to refresh_outputs folder")
+            
+            # Save files to add (new + modified)
+            files_to_add = file_comparison['new_files'] + file_comparison['modified_files']
+            save_output_to_nas(nas_conn, "02_files_to_add.json", files_to_add)
+            logger.info(f"✓ Saved {len(files_to_add)} files to add")
+            
+            # Save files to delete
+            save_output_to_nas(nas_conn, "03_files_to_delete.json", file_comparison['deleted_files'])
+            logger.info(f"✓ Saved {len(file_comparison['deleted_files'])} files to delete")
+            
+            logger.info("✓ All output files generated successfully")
+            
+        except Exception as e:
+            error_msg = f"Failed to generate output files: {str(e)}"
+            logger.error(error_msg)
+            errors.append(error_msg)
+            raise
         
-        # Copy master database to refresh folder
-        copy_master_to_refresh(nas_conn, master_df)
-        logger.info("✓ Copied master database to refresh folder")
+        # Calculate execution time
+        execution_time = datetime.now() - start_time
         
-        # Save files to add (new + modified)
-        files_to_add = file_comparison['new_files'] + file_comparison['modified_files']
-        save_output_to_nas(nas_conn, "02_files_to_add.json", files_to_add)
-        logger.info(f"✓ Saved {len(files_to_add)} files to add")
-        
-        # Save files to delete
-        save_output_to_nas(nas_conn, "03_files_to_delete.json", file_comparison['deleted_files'])
-        logger.info(f"✓ Saved {len(file_comparison['deleted_files'])} files to delete")
+        # Prepare summary statistics
+        summary_stats = {
+            'execution_time': str(execution_time),
+            'start_time': start_time.strftime('%Y-%m-%d %H:%M:%S'),
+            'end_time': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+            'master_database_status': 'Created' if len(master_df) == 0 else 'Loaded',
+            'master_db_records': len(set(master_df['filepath'].tolist()) if len(master_df) > 0 else []),
+            'total_nas_files': len(current_files),
+            'files_to_add': len(files_to_add),
+            'files_to_delete': len(file_comparison['deleted_files']),
+            'new_files': len(file_comparison['new_files']),
+            'modified_files': len(file_comparison['modified_files']),
+            'errors': len(errors),
+            'warnings': len(warnings)
+        }
         
         # Summary
         logger.info("\n" + "=" * 50)
         logger.info("STAGE 2 COMPLETE - Summary:")
-        logger.info(f"  - Master database: {'Created' if len(master_df) == 0 else 'Loaded'}")
-        logger.info(f"  - Files to add: {len(files_to_add)}")
+        logger.info(f"  - Execution time: {execution_time}")
+        logger.info(f"  - Master database: {summary_stats['master_database_status']}")
+        logger.info(f"  - Files to add: {len(files_to_add)} (New: {len(file_comparison['new_files'])}, Modified: {len(file_comparison['modified_files'])})")
         logger.info(f"  - Files to delete: {len(file_comparison['deleted_files'])}")
         logger.info(f"  - Current files in NAS: {len(current_files)}")
         logger.info(f"  - Files in master database: {len(set(master_df['filepath'].tolist()) if len(master_df) > 0 else [])}")
+        logger.info(f"  - Errors: {len(errors)}")
+        logger.info(f"  - Warnings: {len(warnings)}")
         
         # Output files created
-        logger.info("\nOutput files created in database_refresh folder:")
+        logger.info("\nOutput files created in refresh_outputs folder:")
         logger.info("  - 01_master_database.csv")
         logger.info("  - 02_files_to_add.json")
         logger.info("  - 03_files_to_delete.json")
+        logger.info(f"\nMaster database location: {NAS_CONFIG['database_folder']}/{NAS_CONFIG['master_db_filename']}")
+        
+        # Write summary log
+        write_summary_log(nas_conn, summary_stats)
         
     except Exception as e:
-        logger.error(f"Critical error: {str(e)}")
+        error_msg = f"Critical error: {str(e)}"
+        logger.error(error_msg)
+        errors.append(error_msg)
+        
+        # Try to write error log even if there was a critical error
+        if nas_conn:
+            write_error_log(nas_conn, errors, warnings)
+        
         raise
         
     finally:
+        # Write error log if there were any issues
+        if nas_conn and (errors or warnings):
+            write_error_log(nas_conn, errors, warnings)
+        
         # Clean up connections
         if nas_conn:
             nas_conn.close()
